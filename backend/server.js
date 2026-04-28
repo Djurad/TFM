@@ -66,7 +66,7 @@ app.post('/descargar', async (req, res) => {
   }
 });
 
-// Inicia el servidor en el puerto definido y queda escuchando peticiones.
+// Inicia el servidor en el puerto definido (3000) y queda escuchando peticiones.
 // Muestra en consola la URL local para acceder al backend.
 app.listen(PORT, () => {
   console.log(`Servidor en http://localhost:${PORT}`);

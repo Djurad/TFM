@@ -1,6 +1,77 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const { ejecutarReconocimiento } = require('./modules/reconocimiento');
+const { generarPdfRespuesta } = require('./utils/pdf');
+
+const app = express();
+const PORT = 3000;
+
+app.use(cors());
+
+app.use((req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  next();
+});
+
+app.use(express.json());
+
+app.use(express.static(path.join(__dirname, '..', 'frontend')));
+
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, '..', 'frontend', 'index.html'));
+});
+
+// RECONOCIMIENTO WEB
+// Recibe una URL o dominio, ejecuta el reconocimiento y devuelve el JSON obtenido.
+// De momento NO se manda nada a la IA.
+app.post('/analizar', async (req, res) => {
+  try {
+    const { prompt } = req.body;
+
+    if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
+      return res.status(400).json({ error: 'Debes enviar una URL o dominio válido.' });
+    }
+
+    const resultadoReconocimiento = await ejecutarReconocimiento(prompt.trim());
+
+    res.json({
+      resultado: resultadoReconocimiento
+    });
+
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PDF
+app.post('/descargar', async (req, res) => {
+  try {
+    const { prompt, respuesta } = req.body;
+
+    if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
+      return res.status(400).json({ error: 'Debes enviar un prompt válido.' });
+    }
+
+    if (!respuesta || typeof respuesta !== 'string' || !respuesta.trim()) {
+      return res.status(400).json({ error: 'Debes enviar una respuesta válida.' });
+    }
+
+    generarPdfRespuesta(res, prompt, respuesta);
+
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`Servidor en http://localhost:${PORT}`);
+});
+
+/*
+const express = require('express');
+const cors = require('cors');
+const path = require('path');
 const { generarRespuestaIA } = require('./modules/ia');
 const { generarPdfRespuesta } = require('./utils/pdf');
 
@@ -71,3 +142,5 @@ app.post('/descargar', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Servidor en http://localhost:${PORT}`);
 });
+
+*/

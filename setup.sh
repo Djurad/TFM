@@ -1,5 +1,6 @@
 #!/bin/bash
 
+#Perfeccionar al acabar el proyecto
 set -e
 
 echo "======================================"

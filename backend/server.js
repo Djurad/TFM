@@ -1,8 +1,10 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
-const { ejecutarReconocimiento } = require('./modules/reconocimiento');
 const { generarPdfRespuesta } = require('./utils/pdf');
+const { ejecutarReconocimiento } = require('./modules/reconocimiento');
+const { procesarResultados } = require('./modules/procesamiento');
+const { aplicarScoring } = require('./modules/scoring');
 
 const app = express();
 const PORT = 3000;
@@ -33,10 +35,12 @@ app.post('/analizar', async (req, res) => {
       return res.status(400).json({ error: 'Debes enviar una URL o dominio válido.' });
     }
 
-    const resultadoReconocimiento = await ejecutarReconocimiento(prompt.trim());
+    const reconocimiento = await ejecutarReconocimiento(prompt.trim());
+    const procesado = procesarResultados(reconocimiento);
+    const resultadoFinal = aplicarScoring(procesado);
 
     res.json({
-      resultado: resultadoReconocimiento
+      resultado: resultadoFinal
     });
 
   } catch (error) {

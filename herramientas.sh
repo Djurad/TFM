@@ -36,6 +36,16 @@ instalar_tool subfinder github.com/projectdiscovery/subfinder/v2/cmd/subfinder@l
 instalar_tool httpx github.com/projectdiscovery/httpx/cmd/httpx@latest
 instalar_tool katana github.com/projectdiscovery/katana/cmd/katana@latest
 instalar_tool nuclei github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+instalar_tool dalfox github.com/hahwul/dalfox/v2@latest
+
+# sqlmap
+
+if [ -d "tools/sqlmap" ]; then
+  echo "[+] sqlmap OK"
+else
+  mkdir -p tools
+  git clone --depth 1 https://github.com/sqlmapproject/sqlmap.git tools/sqlmap
+fi
 
 echo "[+] OK"
 

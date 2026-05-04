@@ -18,30 +18,104 @@ function obtenerParametros(url) {
   }
 }
 
+function normalizarUrl(url) {
+  return (url || '').split('#')[0];
+}
+
 function categorizarEndpoint(url) {
   const lower = url.toLowerCase();
 
-  if (lower.includes('login')) return 'login';
   if (lower.includes('swagger')) return 'api-docs';
   if (lower.includes('admin')) return 'admin';
+  if (lower.includes('login')) return 'login';
   if (lower.includes('search')) return 'busqueda';
   if (lower.includes('feedback')) return 'formulario';
-  if (lower.includes('?')) return 'dinamico';
+  if (lower.includes('survey')) return 'formulario';
+  if (lower.includes('subscribe')) return 'formulario';
   if (lower.endsWith('.js')) return 'javascript';
   if (lower.endsWith('.css')) return 'estatico';
+  if (lower.includes('?')) return 'dinamico';
 
   return 'general';
 }
 
-function parsearEndpoint(url) {
+function buscarInfoHttpx(url, herramientas) {
+  return herramientas?.httpx?.find(item =>
+    item.url === url ||
+    item.input === url ||
+    normalizarUrl(item.url) === normalizarUrl(url)
+  ) || null;
+}
+
+function buscarHallazgosNuclei(url, hallazgos) {
+  return hallazgos.filter(h =>
+    h.url === url ||
+    normalizarUrl(h.url) === normalizarUrl(url)
+  );
+}
+
+function buscarHallazgosDalfox(url, herramientas) {
+  return herramientas?.dalfox?.filter(item => {
+    const raw = JSON.stringify(item);
+    return raw.includes(url) || raw.includes(normalizarUrl(url));
+  }) || [];
+}
+
+function buscarResultadoSqlmap(url, herramientas) {
+  return herramientas?.sqlmap?.find(item =>
+    item.url === url ||
+    normalizarUrl(item.url) === normalizarUrl(url)
+  ) || null;
+}
+
+function parsearEndpoint(url, herramientas = {}, hallazgos = []) {
   const parametros = obtenerParametros(url);
+  const httpx = buscarInfoHttpx(url, herramientas);
+  const nuclei = buscarHallazgosNuclei(url, hallazgos);
+  const dalfox = buscarHallazgosDalfox(url, herramientas);
+  const sqlmap = buscarResultadoSqlmap(url, herramientas);
 
   return {
     url,
     path: obtenerPath(url),
     tieneParametros: parametros.length > 0,
     parametros,
-    categoria: categorizarEndpoint(url)
+    categoria: categorizarEndpoint(url),
+
+    evidencias: {
+      http: httpx
+        ? {
+            statusCode: httpx.statusCode,
+            title: httpx.title,
+            tecnologias: httpx.tecnologias || [],
+            webserver: httpx.webserver || null,
+            contentLength: httpx.contentLength || null,
+            location: httpx.location || null
+          }
+        : null,
+
+      nuclei: nuclei.map(h => ({
+        id: h.id,
+        severidad: h.severidad,
+        descripcion: h.descripcion,
+        impacto: h.impacto,
+        etiquetas: h.etiquetas
+      })),
+
+      xss: {
+        probado: herramientas?.dalfox !== undefined,
+        confirmado: dalfox.length > 0,
+        resultados: dalfox
+      },
+
+      sqli: {
+        probado: !!sqlmap,
+        confirmado: !!sqlmap?.vulnerable,
+        evidencia: sqlmap?.evidencia || null,
+        resumen: sqlmap?.resumen || [],
+        error: sqlmap?.error || null
+      }
+    }
   };
 }
 
@@ -106,11 +180,13 @@ function enriquecerHallazgo(hallazgo) {
 }
 
 function procesarResultados(reconocimiento) {
-  const endpoints = reconocimiento.endpoints.map(parsearEndpoint);
-
   const hallazgos = reconocimiento.vulnerabilidades
     .map(parsearHallazgo)
     .map(enriquecerHallazgo);
+
+  const endpoints = reconocimiento.endpoints.map(endpoint =>
+    parsearEndpoint(endpoint, reconocimiento.herramientas, hallazgos)
+  );
 
   return {
     ...reconocimiento,

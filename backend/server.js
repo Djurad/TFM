@@ -68,8 +68,6 @@ app.post('/analizar', async (req, res) => {
 
     // Devuelve el análisis técnico completo, los endpoints enviados a IA y la respuesta IA.
     res.json({
-      resultado,
-      endpointsIA: agrupados,
       analisisIA
     });
 

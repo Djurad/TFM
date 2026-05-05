@@ -42,7 +42,7 @@ btnAnalizar.addEventListener('click', async () => {
     }
 
     // Guardamos el JSON formateado para mostrarlo y reutilizarlo en la descarga.
-    ultimaRespuesta = JSON.stringify(data.resultado, null, 2);
+    ultimaRespuesta = JSON.stringify(data, null, 2);
 
     // Mostramos en pantalla el resultado principal del reconocimiento.
     resultado.textContent = ultimaRespuesta;

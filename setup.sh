@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash setup
 
 set -e
 
@@ -91,4 +91,4 @@ echo "source ~/.bashrc"
 echo ""
 echo "Para arrancar el backend:"
 echo "cd backend"
-echo "node server.js"
+echo "node server.js" 

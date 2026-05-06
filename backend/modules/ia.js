@@ -107,7 +107,7 @@ CRITERIOS:
           temperature: 0.1,
 
           // Límite aproximado de tokens generados por Ollama.
-          num_predict: 800
+          num_predict: 3000
         }
       })
     });

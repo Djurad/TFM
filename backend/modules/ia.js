@@ -73,105 +73,211 @@ const generarRespuestaIA = async (prompt) => {
         prompt,
         stream: false,
         system: `
-Eres un pentester profesional.
-
-Analiza endpoints web y determina su criticidad de forma REALISTA.
-
-REGLAS:
-- NO inventes vulnerabilidades
-- SOLO evalúa riesgo potencial o confirmado
-- Sé preciso y conservador
-- Responde SOLO en JSON válido
-- No añadas texto fuera del JSON
-
-ESCALA:
-0 informativo
-2 bajo
-4 medio
-7 alto
-9 crítico
-
-CRITERIOS:
-- Estático → informativo
-- Parámetros → bajo/medio
-- content/template/file → posible LFI → medio
-- url/redirect → posible open redirect → medio
-- login → medio
-- admin → medio/alto
-- swagger → bajo/medio
-- XSS confirmada → alto
-- SQLi confirmada → crítico
-`,
+        Eres un generador de informes técnicos de ciberseguridad.
+        Redactas informes claros, profesionales y suficientemente detallados.
+        Respondes siempre en español.
+        Tu salida debe ser un informe profesional, no una explicación del JSON recibido.
+        No uses tono conversacional.
+        No menciones que eres una IA.
+        `,
         options: {
-          // Temperatura baja para obtener respuestas más estables y conservadoras.
           temperature: 0.1,
-
-          // Límite aproximado de tokens generados por Ollama.
-          num_predict: 3000
+          num_predict: 1400,
+          num_ctx: 5000,
+          num_thread: 4
         }
       })
     });
 
-    // Si Ollama responde con error HTTP, se convierte en una excepción controlada.
     if (!response.ok) throw new Error(`Error de Ollama: ${response.status}`);
 
     const data = await response.json();
-
-    // Ollama devuelve el texto generado dentro de la propiedad "response".
     return data.response || '';
   } catch (error) {
     throw new Error(`Fallo al conectar con la IA: ${error.message}`);
   }
 };
 
-
 // Prepara los endpoints agrupados, pide a la IA que los valore y parsea el JSON devuelto.
-const analizarEndpointsIA = async (endpoints) => {
+const analizarEndpointsIA = async (datosAnalisis) => {
   try {
-    // Se envía a la IA solo la información necesaria para valorar riesgo.
-    const input = endpoints.map(e => ({
-      patron: e.patron,
-      categoria: e.categoria,
-      parametros: e.parametros,
-      tieneParametros: e.parametros?.length > 0,
-      evidencias: {
-        sqli: e.evidencias?.sqli?.confirmado || false,
-        xss: e.evidencias?.xss?.confirmado || false,
-        nuclei: (e.evidencias?.nuclei || []).map(n => n.severidad)
-      }
-    }));
-
-    // Prompt específico: obliga a devolver un array JSON estructurado.
     const prompt = `
-Analiza estos endpoints y devuelve un array JSON.
+Genera un informe profesional de análisis de seguridad web a partir de los datos técnicos proporcionados.
 
-Para cada endpoint devuelve:
-- patron
-- criticidad (número)
-- nivel ("informativo","bajo","medio","alto","critico")
-- relevante (true/false)
-- motivo (breve)
+La respuesta debe estar completamente en ESPAÑOL.
 
-Endpoints:
-${JSON.stringify(input, null, 2)}
+IMPORTANTE:
+- No describas el JSON.
+- No expliques la estructura de los datos.
+- No digas frases como:
+  "la información proporcionada es..."
+  "como pentester"
+  "he analizado"
+  "he identificado"
+  "parece"
+  "podría"
+- No hables en primera persona.
+- No uses tono conversacional.
+- No menciones IA, modelo o proceso automático.
+- No devuelvas JSON.
+- No inventes vulnerabilidades confirmadas sin evidencias reales.
+
+Tu tarea es transformar los datos técnicos en un informe narrativo profesional de auditoría ofensiva.
+
+El informe debe tener formato profesional y una redacción extensa y desarrollada.
+
+REQUISITOS DE REDACCIÓN:
+- El informe debe ser detallado y técnico.
+- Cada sección debe desarrollarse ampliamente.
+- Cada apartado debe contener varios párrafos explicativos.
+- No resumir hallazgos en una sola frase.
+- Explicar el contexto técnico de cada vulnerabilidad o riesgo.
+- Desarrollar el impacto potencial de explotación.
+- Explicar técnicamente las mitigaciones.
+- Mantener estilo formal de auditoría profesional.
+- El contenido debe parecer un informe real de pentesting ofensivo.
+- Evitar respuestas genéricas o demasiado cortas.
+- No enumerar simplemente endpoints.
+- Transformar los datos en análisis técnicos reales.
+
+LONGITUD MÍNIMA:
+- Resumen ejecutivo: mínimo 2 párrafos.
+- Superficie de ataque: mínimo 3 párrafos.
+- Vulnerabilidades y riesgos: desarrollar cada hallazgo individualmente.
+- Mitigaciones: explicar técnicamente cada recomendación.
+- Conclusión: mínimo 2 párrafos.
+
+El informe debe seguir EXACTAMENTE esta estructura:
+
+# Informe de análisis de seguridad web
+
+## 1. Resumen ejecutivo
+Explicar el estado general de seguridad del objetivo.
+Indicar si existen vulnerabilidades confirmadas o principalmente riesgos potenciales.
+Desarrollar una valoración global del nivel de exposición observado.
+
+## 2. Superficie de ataque identificada
+Explicar la superficie de ataque detectada:
+- endpoints dinámicos
+- formularios
+- login
+- documentación Swagger/API
+- endpoints administrativos
+- parámetros sensibles
+- recursos accesibles públicamente
+
+No mencionar categorías internas del sistema como "dinamico".
+
+## 3. Vulnerabilidades confirmadas
+Incluir únicamente vulnerabilidades con evidencia confirmada.
+
+Para cada vulnerabilidad incluir:
+- descripción técnica
+- riesgo asociado
+- impacto potencial
+- endpoints afectados
+- criticidad
+- mitigación recomendada
+
+Si no existen vulnerabilidades confirmadas, indicarlo claramente.
+
+## 4. Riesgos potenciales identificados
+Analizar riesgos potenciales relacionados con:
+- parámetros content
+- template
+- file
+- sec
+- url
+- job
+- formularios
+- login
+- Swagger
+- rutas administrativas
+- exposición API
+- manipulación de parámetros
+- posibles LFI
+- posibles Open Redirect
+- exposición de información
+
+Para cada riesgo incluir:
+- explicación técnica
+- posible vector de explotación
+- impacto potencial
+- endpoints relacionados
+- criticidad estimada
+
+## 5. Impacto potencial de explotación
+Explicar consecuencias posibles:
+- robo de sesión
+- ejecución de JavaScript
+- acceso no autorizado
+- exposición de información sensible
+- enumeración de APIs
+- manipulación de rutas
+- abuso de formularios
+- ataques sobre autenticación
+- movimientos laterales
+- incremento de superficie de ataque
+
+Relacionar siempre el impacto con los hallazgos encontrados.
+
+## 6. Recomendaciones técnicas de mitigación
+Desarrollar recomendaciones técnicas concretas:
+- validación de entrada
+- sanitización
+- codificación de salida
+- protección XSS
+- control de acceso
+- protección CSRF
+- listas blancas
+- endurecimiento de Swagger
+- restricción de documentación API
+- validación de parámetros
+- logging
+- monitorización
+- segmentación
+- revisión manual de endpoints sensibles
+
+Cada mitigación debe explicarse técnicamente.
+
+## 7. Priorización de riesgos
+Clasificar hallazgos según:
+- Crítico
+- Alto
+- Medio
+- Bajo
+- Informativo
+
+Justificar brevemente la prioridad asignada.
+
+## 8. Conclusión final
+Redactar una conclusión profesional y extensa.
+Explicar el estado general de exposición observado.
+Indicar qué elementos requieren revisión prioritaria.
+Mantener tono técnico y profesional de auditoría ofensiva.
+
+REGLAS TÉCNICAS IMPORTANTES:
+- Si xss.confirmado es true, tratarlo como vulnerabilidad confirmada de criticidad alta.
+- Si sqli.confirmado es true, tratarlo como vulnerabilidad confirmada crítica o alta.
+- Si existen hallazgos Nuclei, utilizar su severidad para priorizar riesgos.
+- Si todos los indicadores están en false, NO afirmar que existen vulnerabilidades confirmadas.
+- Diferenciar SIEMPRE entre:
+  - vulnerabilidad confirmada
+  - riesgo potencial
+- No inventar explotación exitosa sin evidencias.
+- Redactar siempre de forma técnica y profesional.
+
+Datos técnicos del análisis:
+${JSON.stringify(datosAnalisis, null, 2)}
 `;
+
 
     const respuesta = await generarRespuestaIA(prompt);
 
-    try {
-      // Si la IA respeta el formato, se devuelve JSON listo para consumir.
-      return JSON.parse(respuesta);
-    } catch {
-      // Si no devuelve JSON válido, se conserva la respuesta cruda para depuración.
-      return {
-        error: 'La IA no devolvió JSON válido',
-        raw: respuesta
-      };
-    }
+    return respuesta.trim();
+
   } catch (error) {
-    return {
-      error: error.message
-    };
+    return `Error al generar el análisis IA: ${error.message}`;
   }
 };
 

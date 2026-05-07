@@ -75,8 +75,41 @@ app.post('/analizar', async (req, res) => {
     console.log(JSON.stringify(agrupados, null, 2));
     console.log('=================================================\n');
 
-    // 6. Pide a la IA una valoración adicional de los patrones agrupados.
-    const analisisIA = await analizarEndpointsIA(agrupados);
+    const datosParaIA = {
+      target: resultado.target,
+      fecha: resultado.fecha,
+      resumen: resultado.resumen,
+      riesgoGlobal: resultado.riesgoGlobal,
+      distribucion: resultado.distribucion,
+
+      vulnerabilidades: resultado.vulnerabilidades,
+
+      endpointsRelevantes: resultado.endpoints
+        .filter(e =>
+          e.evidencias?.xss?.confirmado ||
+          e.evidencias?.sqli?.confirmado ||
+          e.evidencias?.nuclei?.length > 0 ||
+          e.parametros?.length > 0 ||
+          e.categoria === 'login' ||
+          e.patron?.toLowerCase().includes('swagger')
+        )
+        .slice(0, 40)
+        .map(e => ({
+          patron: e.patron,
+          categoria: e.categoria,
+          parametros: e.parametros,
+          evidencias: {
+            xss: e.evidencias?.xss?.confirmado || false,
+            sqli: e.evidencias?.sqli?.confirmado || false,
+            nuclei: (e.evidencias?.nuclei || []).map(n => ({
+              nombre: n.nombre,
+              severidad: n.severidad
+            }))
+          }
+        }))
+    };
+
+    const analisisIA = await analizarEndpointsIA(datosParaIA);
 
     console.log('\n========== RESPUESTA FINAL IA ==========');
     console.log(JSON.stringify(analisisIA, null, 2));

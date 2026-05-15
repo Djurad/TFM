@@ -6,6 +6,9 @@ echo "[+] Setup"
 
 # Go
 
+sudo apt install nodejs
+npm install
+
 if command -v go >/dev/null 2>&1; then
 echo "[+] Go OK"
 else

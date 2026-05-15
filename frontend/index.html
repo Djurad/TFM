@@ -1,89 +1,279 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TFM - Asistente IA</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TFM - Analisis de seguridad</title>
 
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            background-color: #f4f6f8;
-            margin: 0;
-            padding: 0;
-        }
+  <style>
+    * {
+      box-sizing: border-box;
+    }
 
-        .container {
-            max-width: 900px;
-            margin: 50px auto;
-            background: white;
-            padding: 30px;
-            border-radius: 10px;
-            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
-        }
+    body {
+      margin: 0;
+      background: #f4f6f8;
+      color: #17202a;
+      font-family: Arial, sans-serif;
+    }
 
-        h1 {
-            text-align: center;
-        }
+    .container {
+      width: min(1120px, calc(100% - 32px));
+      margin: 32px auto;
+    }
 
-        textarea {
-            width: 100%;
-            height: 150px;
-            padding: 10px;
-            margin-top: 20px;
-            font-size: 14px;
-            border-radius: 5px;
-            border: 1px solid #ccc;
-        }
+    .panel {
+      background: #fff;
+      border: 1px solid #dde3ea;
+      border-radius: 8px;
+      padding: 24px;
+      box-shadow: 0 8px 22px rgba(21, 36, 54, 0.08);
+    }
 
-        .buttons {
-            margin-top: 15px;
-            display: flex;
-            gap: 10px;
-        }
+    h1 {
+      margin: 0 0 18px;
+      font-size: 28px;
+    }
 
-        button {
-            padding: 10px 20px;
-            border: none;
-            border-radius: 5px;
-            cursor: pointer;
-            font-weight: bold;
-        }
+    label {
+      display: block;
+      margin-bottom: 8px;
+      font-weight: 700;
+    }
 
-        #btnAnalizar {
-            background-color: #007bff;
-            color: white;
-        }
+    input {
+      width: 100%;
+      height: 44px;
+      padding: 0 12px;
+      border: 1px solid #b8c3cf;
+      border-radius: 6px;
+      font-size: 15px;
+    }
 
-        #btnDescargar {
-            background-color: #28a745;
-            color: white;
-        }
+    .buttons {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 14px;
+    }
 
-        #resultado {
-            margin-top: 20px;
-            background: #f1f1f1;
-            padding: 15px;
-            border-radius: 5px;
-            white-space: pre-wrap;
-        }
-    </style>
+    button {
+      min-height: 40px;
+      padding: 0 16px;
+      border: 0;
+      border-radius: 6px;
+      cursor: pointer;
+      color: #fff;
+      font-weight: 700;
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.55;
+    }
+
+    #btnAnalizar {
+      background: #1769aa;
+    }
+
+    #btnGenerarInforme {
+      background: #1f7a4d;
+    }
+
+    .status {
+      margin-top: 14px;
+      padding: 10px 12px;
+      border-radius: 6px;
+      background: #eef2f5;
+      border: 1px solid #dde3ea;
+    }
+
+    .status.success {
+      background: #eaf7ef;
+      border-color: #b8dfc8;
+    }
+
+    .status.error {
+      background: #fdeeee;
+      border-color: #f0b9b9;
+    }
+
+    .status.loading {
+      background: #eef5ff;
+      border-color: #b8d0f0;
+    }
+
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(120px, 1fr));
+      gap: 10px;
+      margin: 18px 0;
+    }
+
+    .summary-item,
+    .tool-row,
+    .finding {
+      background: #fff;
+      border: 1px solid #dde3ea;
+      border-radius: 8px;
+    }
+
+    .summary-item {
+      padding: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .summary-item strong {
+      font-size: 22px;
+    }
+
+    .tools {
+      display: grid;
+      gap: 8px;
+      margin-bottom: 18px;
+    }
+
+    .tool-row {
+      display: grid;
+      grid-template-columns: 140px 110px 120px 1fr;
+      gap: 12px;
+      align-items: center;
+      padding: 10px 12px;
+    }
+
+    .tool-row small {
+      color: #8a1f1f;
+    }
+
+    .tool-status,
+    .badge,
+    .severity {
+      display: inline-flex;
+      align-items: center;
+      width: fit-content;
+      min-height: 24px;
+      padding: 0 8px;
+      border-radius: 999px;
+      background: #eef2f5;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .results {
+      display: grid;
+      gap: 14px;
+    }
+
+    .finding {
+      padding: 16px;
+      border-left-width: 6px;
+    }
+
+    .finding header {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .finding h2 {
+      margin: 12px 0 8px;
+      font-size: 20px;
+    }
+
+    .finding p {
+      margin: 0 0 12px;
+      line-height: 1.5;
+    }
+
+    dl {
+      display: grid;
+      grid-template-columns: 150px 1fr;
+      gap: 8px 12px;
+      margin: 0;
+    }
+
+    dt {
+      font-weight: 700;
+      color: #4a5b6b;
+    }
+
+    dd {
+      margin: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .muted {
+      background: #f4f6f8;
+      color: #51606f;
+    }
+
+    .severity-critical {
+      border-color: #b42318;
+    }
+
+    .severity-high {
+      border-color: #d97008;
+    }
+
+    .severity-medium {
+      border-color: #c79b00;
+    }
+
+    .severity-low {
+      border-color: #2f80ed;
+    }
+
+    .severity-info {
+      border-color: #6b7785;
+    }
+
+    .empty {
+      margin: 0;
+      padding: 16px;
+      background: #fff;
+      border: 1px solid #dde3ea;
+      border-radius: 8px;
+    }
+
+    @media (max-width: 760px) {
+      .summary,
+      .tool-row,
+      dl {
+        grid-template-columns: 1fr;
+      }
+
+      .finding header {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+    }
+  </style>
 </head>
 <body>
+  <main class="container">
+    <section class="panel">
+      <h1>Analisis de seguridad web</h1>
 
-<div class="container">
-    <h1>Asistente IA</h1>
+      <label for="prompt">Objetivo</label>
+      <input id="prompt" placeholder="testphp.vulnweb.com">
 
-    <textarea id="prompt" placeholder="Escribe aquí tu prompt..."></textarea>
-
-    <div class="buttons">
+      <div class="buttons">
         <button id="btnAnalizar">Analizar</button>
-        <button id="btnDescargar">Descargar PDF</button>
-    </div>
+        <button id="btnGenerarInforme" disabled>Generar informe</button>
+      </div>
 
-    <div id="resultado">Aquí aparecerá el resultado...</div>
-</div>
+      <div id="estado" class="status">Introduce un dominio o URL para iniciar el analisis.</div>
+    </section>
 
-<script src="app.js"></script>
+    <section id="resumen" class="summary"></section>
+    <section id="herramientas" class="tools"></section>
+    <section id="resultados" class="results"></section>
+  </main>
+
+  <script src="app.js"></script>
 </body>
 </html>

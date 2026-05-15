@@ -1,6 +1,6 @@
 const { exec } = require('child_process');
 
-function ejecutarComando(comando) {
+function ejecutarComando(comando, opciones = {}) {
   return new Promise((resolve, reject) => {
     exec(
       comando,
@@ -11,7 +11,14 @@ function ejecutarComando(comando) {
       (error, stdout, stderr) => {
         if (error) {
           if (stdout && stdout.trim()) return resolve(stdout);
-          return reject(new Error(stderr || error.message));
+          if (opciones.permitirFalloSinSalida) return resolve('');
+
+          const detalles = [
+            stderr && stderr.trim(),
+            error.message && error.message.trim()
+          ].filter(Boolean);
+
+          return reject(new Error(detalles.join('\n') || 'Comando fallido sin salida de error.'));
         }
 
         resolve(stdout);
@@ -20,7 +27,7 @@ function ejecutarComando(comando) {
   });
 }
 
-function limpiarColoresANSI(texto) {
+function limpiarColoresANSI(texto = '') {
   return texto.replace(/\x1B\[[0-9;]*m/g, '');
 }
 
@@ -36,7 +43,7 @@ function validarTarget(target) {
   return regex.test(target);
 }
 
-function parsearLineas(texto) {
+function parsearLineas(texto = '') {
   return limpiarColoresANSI(texto)
     .split('\n')
     .map(linea => linea.trim())
@@ -145,10 +152,42 @@ async function ejecutarReconocimiento(targetOriginal) {
   const target = limpiarTarget(targetOriginal);
 
   if (!validarTarget(target)) {
-    throw new Error('Target no válido. Usa un dominio, por ejemplo: testphp.vulnweb.com');
+    throw new Error('Target no valido. Usa un dominio, por ejemplo: testphp.vulnweb.com');
   }
 
-  const subfinderOutput = await ejecutarComando(
+  const toolResults = {};
+
+  async function ejecutarHerramienta(nombre, comando, parser = parsearLineas) {
+    try {
+      const raw = await ejecutarComando(comando, {
+        permitirFalloSinSalida: nombre === 'nuclei'
+      });
+      const parsed = parser(raw);
+
+      toolResults[nombre] = {
+        status: 'success',
+        raw,
+        parsed,
+        findings: []
+      };
+
+      return raw;
+    } catch (error) {
+      toolResults[nombre] = {
+        status: 'error',
+        raw: '',
+        parsed: [],
+        findings: [],
+        error: error.message
+      };
+
+      console.error(`Error en ${nombre}:`, error.message);
+      return '';
+    }
+  }
+
+  const subfinderOutput = await ejecutarHerramienta(
+    'subfinder',
     `subfinder -d ${target} -silent`
   );
 
@@ -160,57 +199,73 @@ async function ejecutarReconocimiento(targetOriginal) {
 
   const inputHttpx = subdominios.join('\n');
 
-  const httpxOutput = await ejecutarComando(
-    `printf "%s\n" "${inputHttpx}" | httpx -silent -json -title -status-code -tech-detect -web-server -content-length -location -follow-redirects -no-color`
+  const httpxOutput = await ejecutarHerramienta(
+    'httpx',
+    `printf "%s\n" "${inputHttpx}" | httpx -silent -json -title -status-code -tech-detect -web-server -content-length -location -follow-redirects -no-color`,
+    parsearHttpxJson
   );
 
   const httpx = parsearHttpxJson(httpxOutput);
-
-  const activos = httpx
-    .map(item => item.url)
-    .filter(Boolean);
-
+  const activos = httpx.map(item => item.url).filter(Boolean);
   const inputKatana = activos.join('\n');
 
   const katanaOutput = activos.length > 0
-    ? await ejecutarComando(
+    ? await ejecutarHerramienta(
+        'katana',
         `printf "%s\n" "${inputKatana}" | katana -silent -depth 3`
       )
     : '';
 
-  const endpoints = parsearLineas(katanaOutput);
+  if (activos.length === 0) {
+    toolResults.katana = {
+      status: 'skipped',
+      raw: '',
+      parsed: [],
+      findings: [],
+      error: 'No hay activos HTTP para rastrear.'
+    };
+  }
 
+  const endpoints = parsearLineas(katanaOutput);
   const inputNuclei = activos.join('\n');
 
-  let nucleiOutput = '';
+  const nucleiOutput = activos.length > 0
+    ? await ejecutarHerramienta(
+        'nuclei',
+        `printf "%s\n" "${inputNuclei}" | nuclei -severity info,low,medium,high,critical -silent -timeout 10 -no-color`
+      )
+    : '';
 
-  if (activos.length > 0) {
-    try {
-      nucleiOutput = await ejecutarComando(
-        `printf "%s\n" "${inputNuclei}" | nuclei -severity info,low,medium,high,critical -silent -timeout 10`
-      );
-    } catch (error) {
-      console.error('Error en Nuclei:', error.message);
-      nucleiOutput = '';
-    }
+  if (activos.length === 0) {
+    toolResults.nuclei = {
+      status: 'skipped',
+      raw: '',
+      parsed: [],
+      findings: [],
+      error: 'No hay activos HTTP para analizar con nuclei.'
+    };
   }
 
   const vulnerabilidades = parsearLineas(nucleiOutput);
-
   const endpointsConParametros = endpoints.filter(tieneParametros);
   const inputDalfox = endpointsConParametros.join('\n');
 
-  let dalfoxOutput = '';
+  const dalfoxOutput = endpointsConParametros.length > 0
+    ? await ejecutarHerramienta(
+        'dalfox',
+        `printf "%s\n" "${inputDalfox}" | dalfox pipe --silence --format json`,
+        parsearDalfox
+      )
+    : '';
 
-  if (endpointsConParametros.length > 0) {
-    try {
-      dalfoxOutput = await ejecutarComando(
-        `printf "%s\n" "${inputDalfox}" | dalfox pipe --silence --format json`
-      );
-    } catch (error) {
-      console.error('Error en Dalfox:', error.message);
-      dalfoxOutput = '';
-    }
+  if (endpointsConParametros.length === 0) {
+    toolResults.dalfox = {
+      status: 'skipped',
+      raw: '',
+      parsed: [],
+      findings: [],
+      error: 'No hay endpoints con parametros para probar XSS.'
+    };
   }
 
   const dalfox = parsearDalfox(dalfoxOutput);
@@ -242,6 +297,13 @@ async function ejecutarReconocimiento(targetOriginal) {
     }
   }
 
+  toolResults.sqlmap = {
+    status: sqlmap.some(item => item.error) ? 'partial' : 'success',
+    raw: JSON.stringify(sqlmap, null, 2),
+    parsed: sqlmap,
+    findings: []
+  };
+
   return {
     target,
     fecha: new Date().toISOString(),
@@ -249,6 +311,7 @@ async function ejecutarReconocimiento(targetOriginal) {
     activos,
     endpoints,
     vulnerabilidades,
+    tool_results: toolResults,
     herramientas: {
       httpx,
       dalfox,

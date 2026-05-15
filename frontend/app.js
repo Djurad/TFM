@@ -1,104 +1,179 @@
-// Referencias a los elementos principales de la interfaz.
 const btnAnalizar = document.getElementById('btnAnalizar');
-const btnDescargar = document.getElementById('btnDescargar');
+const btnGenerarInforme = document.getElementById('btnGenerarInforme');
 const promptInput = document.getElementById('prompt');
-const resultado = document.getElementById('resultado');
+const estado = document.getElementById('estado');
+const resumen = document.getElementById('resumen');
+const resultados = document.getElementById('resultados');
+const herramientas = document.getElementById('herramientas');
 
-// Guarda el último resultado generado para poder enviarlo después al PDF.
-let ultimaRespuesta = null;
+let ultimoAnalisis = null;
 
-// BOTÓN ANALIZAR
-// Envía la URL/dominio al backend, ejecuta el reconocimiento
-// y muestra el JSON formateado en pantalla.
-btnAnalizar.addEventListener('click', async () => {
-  // Elimina espacios sobrantes antes de validar o enviar el valor.
-  const prompt = promptInput.value.trim();
+const severityLabels = {
+  critical: 'Critica',
+  high: 'Alta',
+  medium: 'Media',
+  low: 'Baja',
+  info: 'Info'
+};
 
-  // No se lanza el análisis si el usuario no ha escrito nada.
-  if (!prompt) {
-    resultado.textContent = 'Escribe una URL o dominio.';
+function setEstado(texto, tipo = '') {
+  estado.textContent = texto;
+  estado.className = tipo ? `status ${tipo}` : 'status';
+}
+
+function escaparHtml(valor) {
+  return String(valor ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function renderResumen(summary = {}) {
+  resumen.innerHTML = '';
+
+  ['critical', 'high', 'medium', 'low', 'info'].forEach(severity => {
+    const item = document.createElement('div');
+    item.className = `summary-item severity-${severity}`;
+    item.innerHTML = `
+      <span>${severityLabels[severity]}</span>
+      <strong>${summary[severity] || 0}</strong>
+    `;
+    resumen.appendChild(item);
+  });
+}
+
+function renderHerramientas(toolResults = {}) {
+  herramientas.innerHTML = '';
+
+  Object.entries(toolResults).forEach(([tool, result]) => {
+    const item = document.createElement('div');
+    item.className = 'tool-row';
+    item.innerHTML = `
+      <strong>${escaparHtml(tool)}</strong>
+      <span class="tool-status">${escaparHtml(result.status)}</span>
+      <span>${(result.findings || []).length} hallazgos</span>
+      ${result.error ? `<small>${escaparHtml(result.error)}</small>` : ''}
+    `;
+    herramientas.appendChild(item);
+  });
+}
+
+function renderFindings(findings = []) {
+  resultados.innerHTML = '';
+
+  if (!findings.length) {
+    resultados.innerHTML = '<p class="empty">No se han identificado vulnerabilidades relevantes.</p>';
     return;
   }
 
-  // Mensaje de estado mientras el backend ejecuta herramientas de reconocimiento.
-  resultado.textContent = 'Ejecutando reconocimiento...';
+  findings.forEach(finding => {
+    const severity = finding.severity || 'info';
+    const card = document.createElement('article');
+    card.className = `finding severity-${severity}`;
+    card.innerHTML = `
+      <header>
+        <div>
+          <span class="badge">${escaparHtml(finding.tool)}</span>
+          <span class="badge muted">${escaparHtml(finding.confidence)}</span>
+        </div>
+        <span class="severity">${severityLabels[severity] || escaparHtml(severity)}</span>
+      </header>
+      <h2>${escaparHtml(finding.title)}</h2>
+      <p>${escaparHtml(finding.description)}</p>
+      <dl>
+        <dt>Activo</dt>
+        <dd>${escaparHtml(finding.affected_url || finding.affected_asset || '-')}</dd>
+        <dt>Evidencia</dt>
+        <dd>${escaparHtml(finding.evidence)}</dd>
+        <dt>Impacto</dt>
+        <dd>${escaparHtml(finding.impact)}</dd>
+        <dt>Recomendacion</dt>
+        <dd>${escaparHtml(finding.recommendation)}</dd>
+      </dl>
+    `;
+    resultados.appendChild(card);
+  });
+}
 
-  // Limpia la respuesta anterior para evitar descargar resultados antiguos.
-  ultimaRespuesta = null;
+btnAnalizar.addEventListener('click', async () => {
+  const prompt = promptInput.value.trim();
+
+  if (!prompt) {
+    setEstado('Escribe una URL o dominio.', 'error');
+    return;
+  }
+
+  ultimoAnalisis = null;
+  btnGenerarInforme.disabled = true;
+  renderResumen();
+  herramientas.innerHTML = '';
+  resultados.innerHTML = '';
+  setEstado('Ejecutando herramientas y extrayendo hallazgos por IA...', 'loading');
 
   try {
-    // Envía el dominio al backend para iniciar el pipeline de análisis.
-    const response = await fetch('http://localhost:3000/analizar', {
+    const response = await fetch('/analizar', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt })
+      body: JSON.stringify({ target: prompt })
     });
 
     const data = await response.json();
 
-    // Si Express devuelve error, se muestra el mensaje recibido del backend.
     if (!response.ok) {
       throw new Error(data.error || 'Error desconocido');
     }
 
-    ultimaRespuesta = data.analisisIA;
-    resultado.textContent = ultimaRespuesta;
-
+    ultimoAnalisis = data;
+    renderResumen(data.summary);
+    renderHerramientas(data.tool_results);
+    renderFindings(data.findings);
+    btnGenerarInforme.disabled = false;
+    setEstado(`Analisis completado para ${data.target}.`, 'success');
   } catch (error) {
-    // Muestra errores de red, validación o ejecución del backend.
-    resultado.textContent = `Error: ${error.message}`;
+    setEstado(`Error: ${error.message}`, 'error');
   }
 });
 
-
-// BOTÓN DESCARGAR
-// Envía el JSON generado al backend para crear un PDF descargable.
-btnDescargar.addEventListener('click', async () => {
-  // Se vuelve a leer el input para incluir el dominio/prompt en el PDF.
-  const prompt = promptInput.value.trim();
-
-  // El PDF necesita saber qué dominio se analizó.
-  if (!prompt) {
-    alert('Introduce una URL o dominio primero');
+btnGenerarInforme.addEventListener('click', async () => {
+  if (!ultimoAnalisis) {
+    setEstado('Primero ejecuta un analisis.', 'error');
     return;
   }
 
-  // Evita descargar un PDF vacío si todavía no se ha ejecutado el análisis.
-  if (!ultimaRespuesta) {
-    alert('Primero pulsa Analizar para generar el reconocimiento');
-    return;
-  }
+  btnGenerarInforme.disabled = true;
+  setEstado('Generando informe PDF con los hallazgos mostrados...', 'loading');
 
   try {
-    // Envía al backend el dominio y el resultado para que pdfkit genere el archivo.
-    const response = await fetch('http://localhost:3000/descargar', {
+    const response = await fetch('/generar-informe', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        prompt,
-        respuesta: ultimaRespuesta
+        target: ultimoAnalisis.target,
+        findings: ultimoAnalisis.findings || []
       })
     });
 
-    // Si el backend no pudo crear el PDF, muestra el error devuelto.
     if (!response.ok) {
       const errorData = await response.json();
-      alert('Error del servidor: ' + errorData.error);
-      return;
+      throw new Error(errorData.error || 'No se pudo generar el informe');
     }
 
-    // Convierte la respuesta binaria en un objeto descargable por el navegador.
     const blob = await response.blob();
     const url = window.URL.createObjectURL(blob);
-
-    // Crea un enlace temporal y simula un clic para iniciar la descarga.
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'resultado.pdf';
+    a.download = 'informe-seguridad.pdf';
+    document.body.appendChild(a);
     a.click();
+    a.remove();
+    window.URL.revokeObjectURL(url);
 
+    setEstado('Informe generado correctamente.', 'success');
   } catch (error) {
-    // Captura errores de red o problemas inesperados durante la descarga.
-    alert('Error: ' + error.message);
+    setEstado(`Error: ${error.message}`, 'error');
+  } finally {
+    btnGenerarInforme.disabled = false;
   }
 });

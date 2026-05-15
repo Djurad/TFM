@@ -1,60 +1,460 @@
-require('dotenv').config();
+const path = require('path');
+const http = require('http');
+const https = require('https');
+require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
-// Endpoint local de Ollama. El host se lee desde backend/.env.
-const OLLAMA_URL = `http://${process.env.OLLAMA_HOST}:11434/api/generate`;
+const {
+  extraerFindingsDesdeRespuestaIA,
+  normalizarFindings,
+  parsearJsonIAFlexible
+} = require('./normalizacion');
 
-// Modelo usado para valorar los endpoints desde la IA local.
-const MODEL = 'llama3';
+const MODEL = process.env.OLLAMA_MODEL || 'llama3';
+const OLLAMA_REINTENTOS = 3;
+const INTENTOS_ENRIQUECIMIENTO_IA = Number(process.env.IA_INTENTOS_ENRIQUECIMIENTO || 3);
 
-// Decide si un endpoint merece una revisión adicional por IA.
-// Se priorizan vulnerabilidades confirmadas, hallazgos de herramientas,
-// endpoints parametrizados y rutas funcionalmente sensibles.
+function construirOllamaUrl() {
+  const host = process.env.OLLAMA_HOST || 'localhost';
+  const base = host.startsWith('http://') || host.startsWith('https://')
+    ? host
+    : `http://${host}`;
+
+  return base.match(/:\d+$/)
+    ? `${base}/api/generate`
+    : `${base}:11434/api/generate`;
+}
+
+const OLLAMA_URL = construirOllamaUrl();
+
+function esperar(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function detalleErrorFetch(error) {
+  return [
+    error.message,
+    error.cause?.code,
+    error.cause?.message
+  ].filter(Boolean).join(' - ');
+}
+
+async function llamarOllama(body, intentos = OLLAMA_REINTENTOS) {
+  let ultimoError = null;
+
+  for (let intento = 1; intento <= intentos; intento++) {
+    try {
+      return await postJsonSinTimeout(OLLAMA_URL, body);
+    } catch (error) {
+      ultimoError = error;
+      console.error(`Intento ${intento}/${intentos} fallido contra Ollama (${OLLAMA_URL}):`, detalleErrorFetch(error));
+
+      if (intento < intentos) {
+        await esperar(1500 * intento);
+      }
+    }
+  }
+
+  throw new Error(`No se pudo conectar con Ollama tras ${intentos} intentos: ${detalleErrorFetch(ultimoError)}`);
+}
+
+function postJsonSinTimeout(url, body) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const payload = JSON.stringify(body);
+    const client = parsed.protocol === 'https:' ? https : http;
+
+    const req = client.request(
+      {
+        hostname: parsed.hostname,
+        port: parsed.port,
+        path: `${parsed.pathname}${parsed.search}`,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payload)
+        },
+        timeout: 0
+      },
+      res => {
+        const chunks = [];
+
+        res.on('data', chunk => chunks.push(chunk));
+        res.on('end', () => {
+          const texto = Buffer.concat(chunks).toString('utf8');
+
+          if (res.statusCode < 200 || res.statusCode >= 300) {
+            reject(new Error(`Error de Ollama: ${res.statusCode}${texto ? ` - ${texto.slice(0, 300)}` : ''}`));
+            return;
+          }
+
+          try {
+            resolve(JSON.parse(texto));
+          } catch (error) {
+            reject(new Error(`Ollama no devolvio JSON HTTP valido: ${error.message}`));
+          }
+        });
+      }
+    );
+
+    req.setTimeout(0);
+    req.on('error', reject);
+    req.write(payload);
+    req.end();
+  });
+}
+
+async function generarRespuestaIA(prompt) {
+  try {
+    const data = await llamarOllama({
+      model: MODEL,
+      prompt,
+      stream: false,
+      keep_alive: '15m',
+      system: `
+Eres un generador de informes tecnicos de ciberseguridad.
+Redactas informes claros, profesionales y suficientemente detallados.
+Respondes siempre en espanol.
+Tu salida debe ser un informe profesional, no una explicacion del JSON recibido.
+No uses tono conversacional.
+No menciones que eres una IA.
+`,
+      options: {
+        temperature: 0.1,
+        num_predict: 1400,
+        num_ctx: 5000,
+        num_thread: 4
+      }
+    });
+
+    return data.response || '';
+  } catch (error) {
+    throw new Error(`Fallo al conectar con la IA: ${error.message}`);
+  }
+}
+
+async function generarJsonIA(prompt) {
+  try {
+    const data = await llamarOllama({
+      model: MODEL,
+      prompt,
+      stream: false,
+      keep_alive: '15m',
+      format: 'json',
+      system: `
+Eres un analista senior de ciberseguridad.
+Respondes siempre con JSON valido, sin Markdown y sin texto fuera del JSON.
+No inventes hallazgos, CVE, CVSS ni CWE sin evidencia.
+`,
+      options: {
+        temperature: 0,
+        num_predict: 1600,
+        num_ctx: 4096,
+        num_thread: 2
+      }
+    });
+
+    return data.response || '';
+  } catch (error) {
+    throw new Error(`Fallo al conectar con la IA: ${error.message}`);
+  }
+}
+
+function limitarTexto(texto = '', max = 2500) {
+  const limpio = String(texto || '').trim();
+
+  if (limpio.length <= max) return limpio;
+
+  return `${limpio.slice(0, max)}\n\n[Salida truncada: ${limpio.length - max} caracteres omitidos]`;
+}
+
+function promptHerramienta(tool, target, payload) {
+  return `Devuelve SOLO JSON valido con esta forma: {"findings":[{"id":"","tool":"${tool}","title":"","description":"","severity":"critical|high|medium|low|info","confidence":"confirmed|probable|possible","cvss":null,"cwe":null,"affected_asset":"","affected_url":null,"evidence":"","impact":"","recommendation":"","false_positive_risk":"low|medium|high","raw_reference":null}]}.
+Si no hay vulnerabilidades reales, devuelve {"findings":[]}.
+Objetivo: ${target}. Herramienta: ${tool}.
+Datos:
+${limitarTexto(JSON.stringify(payload))}`;
+}
+
+async function analizarHerramientaIA(tool, target, toolResult) {
+  if (!toolResult || toolResult.status === 'skipped') return [];
+
+  const payload = {
+    status: toolResult.status,
+    parsed: Array.isArray(toolResult.parsed) ? toolResult.parsed.slice(0, 20) : toolResult.parsed,
+    raw: limitarTexto(toolResult.raw || '', 1200),
+    error: toolResult.error || null
+  };
+
+  const respuesta = await generarJsonIA(promptHerramienta(tool, target, payload));
+  return extraerFindingsDesdeRespuestaIA(respuesta, tool, target);
+}
+
+function trocearArray(items, tamano) {
+  const chunks = [];
+
+  for (let i = 0; i < items.length; i += tamano) {
+    chunks.push(items.slice(i, i + tamano));
+  }
+
+  return chunks;
+}
+
+function limpiarCampoIA(valor) {
+  return typeof valor === 'string' ? valor.trim() : '';
+}
+
+function compactarFindingParaIA(finding) {
+  return {
+    id: finding.id,
+    tool: finding.tool,
+    title: finding.title,
+    description: finding.description,
+    severity: finding.severity,
+    confidence: finding.confidence,
+    cwe: finding.cwe,
+    affected_asset: finding.affected_asset,
+    affected_url: finding.affected_url,
+    evidence: limitarTexto(finding.evidence, 700),
+    raw_reference: limitarTexto(finding.raw_reference, 500)
+  };
+}
+
+function promptImpactoRecomendacion(target, tool, findings) {
+  return `Analiza individualmente cada vulnerabilidad y devuelve SOLO JSON valido.
+No agrupes hallazgos. No uses una recomendacion generica repetida para todos.
+Devuelve exactamente este formato: {"items":[{"id":"","impact":"","recommendation":""}]}.
+Debe haber un item por cada id recibido.
+Conserva el id exacto.
+El campo impact debe explicar el impacto concreto de esa evidencia, parametro, URL o servicio.
+El campo recommendation debe explicar como solucionarlo en ese caso concreto.
+Cada impact y recommendation debe mencionar algun dato concreto del hallazgo: parametro, ruta, payload, servicio o URL.
+Si no puedes determinar impact o recommendation para un id, devuelve ese campo como cadena vacia.
+No inventes CVE, CVSS, CWE ni datos no presentes.
+Objetivo: ${target}
+Herramienta: ${tool}
+Vulnerabilidades:
+${limitarTexto(JSON.stringify(findings), 3200)}`;
+}
+
+function promptImpactoRecomendacionIndividual(target, tool, finding) {
+  return `Analiza SOLO esta vulnerabilidad concreta.
+Devuelve SOLO JSON valido con este formato exacto:
+{"items":[{"id":"${finding.id}","impact":"","recommendation":""}]}
+
+Reglas obligatorias:
+- Conserva exactamente el id "${finding.id}".
+- impact debe explicar el impacto de ESTE caso, no de la vulnerabilidad en general.
+- recommendation debe explicar la correccion de ESTE caso, no una recomendacion generica.
+- impact y recommendation deben mencionar datos concretos presentes en el hallazgo: URL, ruta, parametro, payload, servicio o evidencia.
+- Si hay parametro, mencionalo por nombre.
+- Si hay payload, menciona el tipo de payload o contexto donde se refleja.
+- No dejes impact ni recommendation vacios.
+- Si la evidencia es limitada, redacta una valoracion prudente basada solo en lo observado.
+- No inventes CVE, CVSS, CWE ni datos no presentes.
+
+Objetivo: ${target}
+Herramienta: ${tool}
+Hallazgo:
+${JSON.stringify(finding, null, 2)}`;
+}
+
+function extraerItemsImpacto(texto) {
+  const parsed = parsearJsonIAFlexible(texto);
+
+  if (Array.isArray(parsed)) return parsed;
+
+  const items = parsed.items ||
+    parsed.findings ||
+    parsed.hallazgos ||
+    parsed.results ||
+    parsed.resultados ||
+    parsed.vulnerabilities ||
+    parsed.vulnerabilidades;
+
+  if (Array.isArray(items)) return items;
+  if (items && typeof items === 'object') return [items];
+  if (parsed && typeof parsed === 'object' && (parsed.id || parsed.impact || parsed.recommendation)) return [parsed];
+
+  return [];
+}
+
+function tokensConcretosFinding(finding) {
+  const tokens = new Set();
+
+  function add(valor) {
+    const limpio = String(valor || '')
+      .toLowerCase()
+      .replace(/https?:\/\//g, '')
+      .replace(/[^a-z0-9_./:-]+/g, ' ')
+      .split(/\s+/)
+      .map(token => token.trim())
+      .filter(token => token.length >= 4 && token.length <= 80);
+
+    limpio.forEach(token => tokens.add(token));
+  }
+
+  add(finding.affected_url);
+  add(finding.affected_asset);
+  add(finding.cwe);
+
+  try {
+    const url = new URL(finding.affected_url);
+    add(url.pathname);
+    Array.from(url.searchParams.keys()).forEach(add);
+  } catch {
+    // La URL puede ser nula o parcial.
+  }
+
+  const evidencia = String(finding.evidence || '');
+  const payloadMatch = evidencia.match(/payloads? observados?:([\s\S]*?)(\n[A-Z]|$)/i) ||
+    evidencia.match(/payload:\s*([^\n]+)/i);
+  if (payloadMatch) add(payloadMatch[1]);
+
+  return Array.from(tokens);
+}
+
+function esTextoConcreto(finding, texto) {
+  const limpio = limpiarCampoIA(texto).toLowerCase();
+  if (!limpio) return false;
+
+  const tokens = tokensConcretosFinding(finding);
+  if (!tokens.length) return true;
+
+  return tokens.some(token => limpio.includes(token));
+}
+
+function aplicarImpactosIA(findings, itemsIA) {
+  const mapa = new Map();
+
+  itemsIA.forEach(item => {
+    const id = limpiarCampoIA(item.id);
+    if (!id) return;
+
+    mapa.set(id, {
+      impact: limpiarCampoIA(item.impact || item.impacto),
+      recommendation: limpiarCampoIA(item.recommendation || item.recomendacion)
+    });
+  });
+
+  return findings.map(finding => {
+    const enriquecido = mapa.get(finding.id);
+
+    if (!enriquecido) {
+      return {
+        ...finding,
+        impact: '',
+        recommendation: ''
+      };
+    }
+
+    return {
+      ...finding,
+      impact: enriquecido.impact,
+      recommendation: enriquecido.recommendation
+    };
+  });
+}
+
+function normalizarComparacion(texto) {
+  return limpiarCampoIA(texto)
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+async function enriquecerFindingIndividual(target, tool, finding) {
+  for (let intento = 1; intento <= INTENTOS_ENRIQUECIMIENTO_IA; intento++) {
+    const respuesta = await generarJsonIA(
+      promptImpactoRecomendacionIndividual(target, tool, compactarFindingParaIA(finding))
+    );
+    const items = extraerItemsImpacto(respuesta);
+    const enriquecido = aplicarImpactosIA([finding], items)[0];
+
+    if (enriquecido.impact && enriquecido.recommendation) {
+      return enriquecido;
+    }
+  }
+
+  return finding;
+}
+
+async function enriquecerFindingsIA(target, tool, findings) {
+  const base = normalizarFindings(findings, tool, target)
+    .map(finding => ({
+      ...finding,
+      impact: '',
+      recommendation: ''
+    }));
+
+  if (!base.length) return [];
+
+  const enriquecidos = [];
+
+  for (const finding of base) {
+    try {
+      enriquecidos.push(await enriquecerFindingIndividual(target, tool, finding));
+    } catch (error) {
+      console.error(`IA no pudo completar ${tool}/${finding.id}:`, error.message);
+      enriquecidos.push(finding);
+    }
+  }
+
+  return normalizarFindings(enriquecidos, tool, target);
+}
+
+async function generarSeccionInformeIA(target, tool, findings) {
+  if (!findings.length) {
+    return `## ${tool}\n\nNo se identificaron hallazgos relevantes para esta herramienta.\n`;
+  }
+
+  const prompt = `
+Redacta en espanol una seccion profesional de informe de pentesting para la herramienta ${tool}.
+No inventes hallazgos. Usa exclusivamente los findings recibidos.
+Incluye descripcion tecnica, evidencia, impacto y recomendacion.
+No uses Markdown de tabla.
+
+Objetivo: ${target}
+Findings:
+${JSON.stringify(findings, null, 2)}
+`;
+
+  return generarRespuestaIA(prompt);
+}
+
 function debeRevisarIA(endpoint) {
   if (endpoint.evidencias?.sqli?.confirmado) return true;
   if (endpoint.evidencias?.xss?.confirmado) return true;
   if ((endpoint.evidencias?.nuclei || []).length > 0) return true;
-
   if (endpoint.tieneParametros) return true;
-
-  if (['login', 'admin', 'formulario', 'api-docs'].includes(endpoint.categoria)) {
-    return true;
-  }
-
-  return false;
+  return ['login', 'admin', 'formulario', 'api-docs'].includes(endpoint.categoria);
 }
 
-// Reduce la lista total de endpoints a los que tienen más interés de seguridad.
 function filtrarEndpointsParaIA(endpoints) {
   return endpoints.filter(debeRevisarIA);
 }
 
-// Crea una clave estable para agrupar endpoints con la misma ruta y parámetros.
 function clavePatron(endpoint) {
-  const path = endpoint.path || '';
+  const endpointPath = endpoint.path || '';
   const params = endpoint.parametros || [];
-
-  // Si no hay parámetros, el patrón queda representado solo por el path.
-  if (params.length === 0) return path;
-
-  // Ordenar los parámetros evita duplicados cuando aparecen en distinto orden.
-  return `${path}?${params.sort().join('&')}`;
+  if (params.length === 0) return endpointPath;
+  return `${endpointPath}?${params.slice().sort().join('&')}`;
 }
 
-// Agrupa endpoints equivalentes para enviar a la IA un único ejemplo por patrón.
 function agruparEndpoints(endpoints) {
   const mapa = new Map();
 
-  endpoints.forEach(e => {
-    const clave = clavePatron(e);
+  endpoints.forEach(endpoint => {
+    const clave = clavePatron(endpoint);
 
-    // Solo se guarda el primer endpoint de cada patrón como ejemplo representativo.
     if (!mapa.has(clave)) {
       mapa.set(clave, {
         patron: clave,
-        ejemplo: e.url,
-        categoria: e.categoria,
-        parametros: e.parametros,
-        evidencias: e.evidencias
+        ejemplo: endpoint.url,
+        categoria: endpoint.categoria,
+        parametros: endpoint.parametros,
+        evidencias: endpoint.evidencias
       });
     }
   });
@@ -62,228 +462,16 @@ function agruparEndpoints(endpoints) {
   return Array.from(mapa.values());
 }
 
-// Envía un prompt a Ollama y devuelve la respuesta textual generada por el modelo.
-const generarRespuestaIA = async (prompt) => {
-  try {
-    const response = await fetch(OLLAMA_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: MODEL,
-        prompt,
-        stream: false,
-        system: `
-        Eres un generador de informes técnicos de ciberseguridad.
-        Redactas informes claros, profesionales y suficientemente detallados.
-        Respondes siempre en español.
-        Tu salida debe ser un informe profesional, no una explicación del JSON recibido.
-        No uses tono conversacional.
-        No menciones que eres una IA.
-        `,
-        options: {
-          temperature: 0.1,
-          num_predict: 1400,
-          num_ctx: 5000,
-          num_thread: 4
-        }
-      })
-    });
+async function analizarEndpointsIA(datosAnalisis) {
+  return generarRespuestaIA(JSON.stringify(datosAnalisis, null, 2));
+}
 
-    if (!response.ok) throw new Error(`Error de Ollama: ${response.status}`);
-
-    const data = await response.json();
-    return data.response || '';
-  } catch (error) {
-    throw new Error(`Fallo al conectar con la IA: ${error.message}`);
-  }
-};
-
-// Prepara los endpoints agrupados, pide a la IA que los valore y parsea el JSON devuelto.
-const analizarEndpointsIA = async (datosAnalisis) => {
-  try {
-    const prompt = `
-Genera un informe profesional de análisis de seguridad web a partir de los datos técnicos proporcionados.
-
-La respuesta debe estar completamente en ESPAÑOL.
-
-IMPORTANTE:
-- No describas el JSON.
-- No expliques la estructura de los datos.
-- No digas frases como:
-  "la información proporcionada es..."
-  "como pentester"
-  "he analizado"
-  "he identificado"
-  "parece"
-  "podría"
-- No hables en primera persona.
-- No uses tono conversacional.
-- No menciones IA, modelo o proceso automático.
-- No devuelvas JSON.
-- No inventes vulnerabilidades confirmadas sin evidencias reales.
-
-Tu tarea es transformar los datos técnicos en un informe narrativo profesional de auditoría ofensiva.
-
-El informe debe tener formato profesional y una redacción extensa y desarrollada.
-
-REQUISITOS DE REDACCIÓN:
-- El informe debe ser detallado y técnico.
-- Cada sección debe desarrollarse ampliamente.
-- Cada apartado debe contener varios párrafos explicativos.
-- No resumir hallazgos en una sola frase.
-- Explicar el contexto técnico de cada vulnerabilidad o riesgo.
-- Desarrollar el impacto potencial de explotación.
-- Explicar técnicamente las mitigaciones.
-- Mantener estilo formal de auditoría profesional.
-- El contenido debe parecer un informe real de pentesting ofensivo.
-- Evitar respuestas genéricas o demasiado cortas.
-- No enumerar simplemente endpoints.
-- Transformar los datos en análisis técnicos reales.
-
-LONGITUD MÍNIMA:
-- Resumen ejecutivo: mínimo 2 párrafos.
-- Superficie de ataque: mínimo 3 párrafos.
-- Vulnerabilidades y riesgos: desarrollar cada hallazgo individualmente.
-- Mitigaciones: explicar técnicamente cada recomendación.
-- Conclusión: mínimo 2 párrafos.
-
-El informe debe seguir EXACTAMENTE esta estructura:
-
-# Informe de análisis de seguridad web
-
-## 1. Resumen ejecutivo
-Explicar el estado general de seguridad del objetivo.
-Indicar si existen vulnerabilidades confirmadas o principalmente riesgos potenciales.
-Desarrollar una valoración global del nivel de exposición observado.
-
-## 2. Superficie de ataque identificada
-Explicar la superficie de ataque detectada:
-- endpoints dinámicos
-- formularios
-- login
-- documentación Swagger/API
-- endpoints administrativos
-- parámetros sensibles
-- recursos accesibles públicamente
-
-No mencionar categorías internas del sistema como "dinamico".
-
-## 3. Vulnerabilidades confirmadas
-Incluir únicamente vulnerabilidades con evidencia confirmada.
-
-Para cada vulnerabilidad incluir:
-- descripción técnica
-- riesgo asociado
-- impacto potencial
-- endpoints afectados
-- criticidad
-- mitigación recomendada
-
-Si no existen vulnerabilidades confirmadas, indicarlo claramente.
-
-## 4. Riesgos potenciales identificados
-Analizar riesgos potenciales relacionados con:
-- parámetros content
-- template
-- file
-- sec
-- url
-- job
-- formularios
-- login
-- Swagger
-- rutas administrativas
-- exposición API
-- manipulación de parámetros
-- posibles LFI
-- posibles Open Redirect
-- exposición de información
-
-Para cada riesgo incluir:
-- explicación técnica
-- posible vector de explotación
-- impacto potencial
-- endpoints relacionados
-- criticidad estimada
-
-## 5. Impacto potencial de explotación
-Explicar consecuencias posibles:
-- robo de sesión
-- ejecución de JavaScript
-- acceso no autorizado
-- exposición de información sensible
-- enumeración de APIs
-- manipulación de rutas
-- abuso de formularios
-- ataques sobre autenticación
-- movimientos laterales
-- incremento de superficie de ataque
-
-Relacionar siempre el impacto con los hallazgos encontrados.
-
-## 6. Recomendaciones técnicas de mitigación
-Desarrollar recomendaciones técnicas concretas:
-- validación de entrada
-- sanitización
-- codificación de salida
-- protección XSS
-- control de acceso
-- protección CSRF
-- listas blancas
-- endurecimiento de Swagger
-- restricción de documentación API
-- validación de parámetros
-- logging
-- monitorización
-- segmentación
-- revisión manual de endpoints sensibles
-
-Cada mitigación debe explicarse técnicamente.
-
-## 7. Priorización de riesgos
-Clasificar hallazgos según:
-- Crítico
-- Alto
-- Medio
-- Bajo
-- Informativo
-
-Justificar brevemente la prioridad asignada.
-
-## 8. Conclusión final
-Redactar una conclusión profesional y extensa.
-Explicar el estado general de exposición observado.
-Indicar qué elementos requieren revisión prioritaria.
-Mantener tono técnico y profesional de auditoría ofensiva.
-
-REGLAS TÉCNICAS IMPORTANTES:
-- Si xss.confirmado es true, tratarlo como vulnerabilidad confirmada de criticidad alta.
-- Si sqli.confirmado es true, tratarlo como vulnerabilidad confirmada crítica o alta.
-- Si existen hallazgos Nuclei, utilizar su severidad para priorizar riesgos.
-- Si todos los indicadores están en false, NO afirmar que existen vulnerabilidades confirmadas.
-- Diferenciar SIEMPRE entre:
-  - vulnerabilidad confirmada
-  - riesgo potencial
-- No inventar explotación exitosa sin evidencias.
-- Redactar siempre de forma técnica y profesional.
-
-Datos técnicos del análisis:
-${JSON.stringify(datosAnalisis, null, 2)}
-`;
-
-
-    const respuesta = await generarRespuestaIA(prompt);
-
-    return respuesta.trim();
-
-  } catch (error) {
-    return `Error al generar el análisis IA: ${error.message}`;
-  }
-};
-
-// Exporta las funciones usadas por el servidor y por el pipeline de análisis.
 module.exports = {
   generarRespuestaIA,
+  generarJsonIA,
+  analizarHerramientaIA,
+  enriquecerFindingsIA,
+  generarSeccionInformeIA,
   analizarEndpointsIA,
   filtrarEndpointsParaIA,
   agruparEndpoints

@@ -1,52 +1,58 @@
 const PDFDocument = require('pdfkit');
 
-// Genera un documento PDF con el prompt y la respuesta, y lo envía como descarga.
-// Configura cabeceras HTTP y estructura el contenido con formato básico.
-const generarPdfRespuesta = (res, prompt, respuesta) => {
+function escribirTexto(doc, texto) {
+  String(texto || '')
+    .split('\n')
+    .forEach(linea => {
+      if (linea.startsWith('# ')) {
+        doc.moveDown(0.8).fontSize(18).text(linea.replace(/^#\s+/, ''), {
+          underline: true
+        });
+      } else if (linea.startsWith('## ')) {
+        doc.moveDown(0.7).fontSize(14).text(linea.replace(/^##\s+/, ''), {
+          underline: true
+        });
+      } else {
+        doc.fontSize(10).text(linea || ' ', {
+          align: 'justify'
+        });
+      }
+    });
+}
+
+function generarPdfDesdeInforme(res, target, informe) {
   const doc = new PDFDocument({
     margin: 50,
     size: 'A4'
   });
 
-  // Cabeceras HTTP
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', 'attachment; filename=resultado.pdf');
+  res.setHeader('Content-Disposition', 'attachment; filename=informe-seguridad.pdf');
 
   doc.pipe(res);
 
-  // Título
   doc
     .fontSize(18)
-    .text('Resultado del análisis', {
+    .text('Informe de analisis de seguridad', {
       align: 'center',
       underline: true
     });
 
-  doc.moveDown(2);
+  doc.moveDown(1);
+  doc.fontSize(11).text(`Objetivo: ${target}`, { align: 'left' });
+  doc.moveDown(1);
 
-  // Prompt
-  doc
-    .fontSize(13)
-    .text('Prompt:', { bold: true });
-
-  doc
-    .moveDown(0.5)
-    .fontSize(11)
-    .text(prompt, { align: 'justify' });
-
-  doc.moveDown(1.5);
-
-  // Respuesta
-  doc
-    .fontSize(13)
-    .text('Respuesta IA:', { bold: true });
-
-  doc
-    .moveDown(0.5)
-    .fontSize(11)
-    .text(respuesta, { align: 'justify' });
+  escribirTexto(doc, informe);
 
   doc.end();
-};
+}
 
-module.exports = { generarPdfRespuesta };
+// Compatibilidad con el endpoint antiguo /descargar.
+function generarPdfRespuesta(res, prompt, respuesta) {
+  generarPdfDesdeInforme(res, prompt, respuesta);
+}
+
+module.exports = {
+  generarPdfRespuesta,
+  generarPdfDesdeInforme
+};

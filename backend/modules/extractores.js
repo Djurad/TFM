@@ -1,4 +1,44 @@
 const { normalizarFindings } = require('./normalizacion');
+const { esAssetEstatico } = require('./clasificadorFindings');
+
+const PALABRAS_SENSIBLES = [
+  'login',
+  'signin',
+  'auth',
+  'upload',
+  'file',
+  'graphql',
+  'api',
+  'swagger',
+  'openapi',
+  'docs',
+  'debug',
+  'console',
+  'actuator',
+  'phpmyadmin',
+  'backup',
+  'config',
+  'token',
+  'reset',
+  'password'
+];
+
+const SUPERFICIE_SWAGGER_RUIDOSA = [
+  '/swagger/audio/',
+  '/swagger/video/',
+  '/swagger/image/',
+  '/swagger/multipart/'
+];
+
+const PATRONES_RUIDO_URL = [
+  /%7c%7c/i,
+  /call\(/i,
+  /[?&]line=/i,
+  /[?&]position=/i,
+  /:[0-9]+:[0-9]+/,
+  /\{.*\}/,
+  /\s/
+];
 
 function obtenerPath(url) {
   try {
@@ -17,6 +57,20 @@ function obtenerOrigenYRuta(url) {
   }
 }
 
+function normalizarUrlSuperficie(url = '') {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = '';
+    const params = Array.from(parsed.searchParams.entries())
+      .sort(([a], [b]) => a.localeCompare(b));
+    parsed.search = '';
+    params.forEach(([key, value]) => parsed.searchParams.append(key, value));
+    return parsed.href.replace(/\/$/, '').toLowerCase();
+  } catch {
+    return String(url || '').trim().replace(/\/$/, '').toLowerCase();
+  }
+}
+
 function parsearNucleiLinea(linea, index, target) {
   const limpia = String(linea || '').trim();
   const match = limpia.match(/\[([^\]]+)\]\s+\[([^\]]+)\]\s+\[([^\]]+)\]\s+(\S+)/);
@@ -28,10 +82,11 @@ function parsearNucleiLinea(linea, index, target) {
   return {
     id: `nuclei-${id}-${index + 1}`,
     tool: 'nuclei',
+    type: severity === 'info' ? 'reconocimiento' : 'vulnerability',
     title: id.replace(/[-_]/g, ' '),
     description: `Nuclei detecto el hallazgo ${id} de tipo ${tipo}.`,
     severity,
-    confidence: severity === 'info' ? 'possible' : 'probable',
+    confidence: severity === 'info' ? 'low' : ['high', 'critical'].includes(severity) ? 'high' : 'medium',
     cvss: null,
     cwe: null,
     affected_asset: target,
@@ -80,7 +135,11 @@ function findingsDalfox(toolResult, target) {
       const evidence = limpiarValorDalfox(parsed.evidence || parsed.message_str || '');
       const injectType = parsed.inject_type || parsed.type || 'desconocido';
       const severity = normalizarSeveridadDalfox(parsed.severity, parsed.type);
-      const confirmed = String(parsed.type || '').toUpperCase() === 'V';
+      const tipoDalfox = String(parsed.type || parsed.status || parsed.severity || '').toLowerCase();
+      const confirmed = String(parsed.type || '').toUpperCase() === 'V' ||
+        tipoDalfox.includes('confirmed') ||
+        tipoDalfox.includes('triggered') ||
+        Boolean(parsed.triggered);
       const rawReference = JSON.stringify(parsed);
       const groupKey = [
         obtenerOrigenYRuta(url || target),
@@ -125,7 +184,8 @@ function findingsDalfox(toolResult, target) {
       return {
         id: `dalfox-xss-${index + 1}`,
         tool: 'dalfox',
-        title: grupo.confirmed ? 'XSS confirmado por Dalfox' : 'Payload XSS reflejado por Dalfox',
+        type: 'xss',
+        title: grupo.confirmed ? 'XSS confirmado por Dalfox' : 'Posible XSS reflejado',
         description: `Dalfox detecto un posible XSS en el parametro ${grupo.param || 'identificado'} usando payloads reflejados en contexto ${grupo.injectType}.`,
         severity: grupo.confirmed ? 'high' : grupo.severity,
         confidence: grupo.confirmed ? 'confirmed' : 'probable',
@@ -206,27 +266,89 @@ function normalizarSeveridadDalfox(severity, type) {
   return 'medium';
 }
 
+function esAdminReal(url) {
+  const texto = String(url || '');
+  return /\/admin(\/|$|\?)/i.test(texto) ||
+    /(^|[/?&=])admin([/?&=]|$)/i.test(texto);
+}
+
+function esRutaRuidosa(url) {
+  const lower = String(url || '').toLowerCase();
+  let path = lower;
+
+  try {
+    path = new URL(url).pathname.toLowerCase();
+  } catch {
+    // Se mantiene texto crudo.
+  }
+
+  return SUPERFICIE_SWAGGER_RUIDOSA.some(segmento => path.includes(segmento)) ||
+    PATRONES_RUIDO_URL.some(regex => regex.test(lower)) ||
+    lower.length > 240;
+}
+
+function recomendacionSuperficie(clave) {
+  if (['login', 'signin', 'auth', 'reset', 'password'].includes(clave)) {
+    return 'Revisar controles de autenticacion, proteccion anti-fuerza bruta y gestion de sesion.';
+  }
+
+  if (['swagger', 'openapi', 'docs', 'api-docs', 'swagger-json'].includes(clave)) {
+    return 'Verificar que la documentacion no exponga endpoints sensibles y restringirla si no debe ser publica.';
+  }
+
+  return 'Revisar manualmente si este endpoint requiere controles adicionales.';
+}
+
+function tituloSuperficie(clave, swaggerJson = false) {
+  if (['login', 'signin', 'auth'].includes(clave)) return 'Login descubierto';
+  if (clave === 'admin') return 'Panel administrativo descubierto';
+  if (clave === 'upload') return 'Endpoint de subida descubierto';
+  if (clave === 'graphql') return 'Endpoint GraphQL descubierto';
+  if (swaggerJson) return 'Endpoint OpenAPI descubierto';
+  if (['swagger', 'openapi', 'docs', 'api-docs'].includes(clave)) return 'Documentacion Swagger descubierta';
+  if (clave === 'debug') return 'Endpoint de debug descubierto';
+  if (clave === 'actuator') return 'Endpoint Actuator descubierto';
+  if (clave === 'phpmyadmin') return 'phpMyAdmin descubierto';
+  if (['backup', 'config'].includes(clave)) return 'Ruta sensible de backup/config descubierta';
+  return 'Superficie sensible descubierta';
+}
+
 function findingsSqlmap(toolResult, target) {
   const items = Array.isArray(toolResult.parsed) ? toolResult.parsed : [];
 
   return normalizarFindings(
     items
-      .filter(item => item.vulnerable)
+      .filter(item => ['confirmed_sqli', 'possible_sqli'].includes(item.status))
       .map((item, index) => ({
         id: `sqlmap-sqli-${index + 1}`,
         tool: 'sqlmap',
-        title: 'SQL Injection detectada por sqlmap',
-        description: 'Sqlmap ha identificado indicios de inyeccion SQL en un parametro analizado.',
-        severity: 'critical',
-        confidence: 'confirmed',
+        type: 'vulnerability',
+        title: item.status === 'confirmed_sqli'
+          ? 'SQL Injection confirmada por sqlmap'
+          : 'Posible SQL Injection detectada por sqlmap',
+        description: item.status === 'confirmed_sqli'
+          ? 'Sqlmap ha identificado un punto de inyeccion SQL confirmado.'
+          : 'Sqlmap ha identificado indicios de inyeccion SQL que requieren validacion manual.',
+        severity: item.status === 'confirmed_sqli' ? 'critical' : 'high',
+        confidence: item.status === 'confirmed_sqli' ? 'high' : 'medium',
         cvss: null,
         cwe: 'CWE-89',
         affected_asset: target,
         affected_url: item.url,
-        evidence: [item.evidencia, ...(item.resumen || [])].filter(Boolean).join('\n'),
+        evidence: [
+          item.evidencia,
+          item.parametro ? `Parametro: ${item.parametro}` : null,
+          item.payload ? `Payload: ${item.payload}` : null,
+          item.dbms ? `DBMS: ${item.dbms}` : null,
+          ...(item.resumen || [])
+        ].filter(Boolean).join('\n'),
         impact: '',
         recommendation: '',
-        false_positive_risk: 'low',
+        false_positive_risk: item.status === 'confirmed_sqli' ? 'low' : 'medium',
+        status: item.status,
+        parametro: item.parametro || null,
+        payload: item.payload || null,
+        dbms: item.dbms || null,
         raw_reference: JSON.stringify(item).slice(0, 1200)
       })),
     'sqlmap',
@@ -236,44 +358,150 @@ function findingsSqlmap(toolResult, target) {
 
 function extraerFindingsDeterministas(tool, toolResult, target) {
   if (tool === 'katana') return findingsKatana(toolResult, target);
+  if (tool === 'feroxbuster') return findingsFeroxbuster(toolResult, target);
   if (tool === 'nuclei') return findingsNuclei(toolResult, target);
   if (tool === 'dalfox') return findingsDalfox(toolResult, target);
   if (tool === 'sqlmap') return findingsSqlmap(toolResult, target);
+  if (tool === 'trufflehog') return findingsTrufflehog(toolResult, target);
   return [];
+}
+
+function esExposicionFerox(url = '') {
+  const lower = String(url).toLowerCase();
+  return lower.includes('/.env') ||
+    lower.includes('/.git') ||
+    lower.includes('backup.zip') ||
+    lower.includes('config.php') ||
+    lower.includes('database.sql') ||
+    lower.includes('dump.sql') ||
+    /\.(zip|tar|tgz|tar\.gz|7z|rar|bak|backup|sql)(\?|$)/i.test(lower);
+}
+
+function findingsFeroxbuster(toolResult, target) {
+  const endpoints = Array.isArray(toolResult.parsed) ? toolResult.parsed : [];
+  const interesantes = endpoints.filter(endpoint => endpoint.category === 'suspicious' || esExposicionFerox(endpoint.url));
+
+  return normalizarFindings(
+    interesantes
+      .slice(0, 30)
+      .map((endpoint, index) => ({
+        id: esExposicionFerox(endpoint.url)
+          ? `feroxbuster-exposure-${index + 1}`
+          : `feroxbuster-surface-${index + 1}`,
+        tool: 'feroxbuster',
+        type: esExposicionFerox(endpoint.url) ? 'vulnerability' : 'surface',
+        exposure: esExposicionFerox(endpoint.url),
+        title: endpoint.url.includes('/.env')
+          ? 'Posible archivo .env expuesto'
+          : endpoint.url.includes('/.git')
+            ? 'Posible repositorio .git expuesto'
+            : esExposicionFerox(endpoint.url)
+              ? 'Posible archivo sensible expuesto'
+              : 'Ruta sensible descubierta por Feroxbuster',
+        description: esExposicionFerox(endpoint.url)
+          ? 'Feroxbuster descubrio una ruta sensible accesible que requiere validacion manual.'
+          : 'Feroxbuster descubrio superficie sensible. No es una vulnerabilidad confirmada.',
+        severity: esExposicionFerox(endpoint.url) ? 'medium' : 'low',
+        confidence: esExposicionFerox(endpoint.url) ? 'medium' : 'low',
+        isVulnerability: esExposicionFerox(endpoint.url),
+        affected_asset: target,
+        affected_url: endpoint.url,
+        evidence: [
+          `URL: ${endpoint.url}`,
+          endpoint.status ? `Status: ${endpoint.status}` : null,
+          endpoint.contentLength ? `Content-Length: ${endpoint.contentLength}` : null
+        ].filter(Boolean).join('\n'),
+        recommendation: esExposicionFerox(endpoint.url)
+          ? 'Restringir el acceso publico a archivos sensibles, backups, configuraciones o repositorios internos.'
+          : 'Revisar manualmente si este endpoint requiere controles adicionales.',
+        raw_reference: JSON.stringify(endpoint).slice(0, 1200)
+      })),
+    'feroxbuster',
+    target
+  );
+}
+
+function findingsTrufflehog(toolResult, target) {
+  const items = Array.isArray(toolResult.parsed) ? toolResult.parsed : [];
+
+  return normalizarFindings(
+    items.map((item, index) => ({
+      id: item.id || `trufflehog-secret-${index + 1}`,
+      tool: 'trufflehog',
+      type: 'secret',
+      title: item.verified ? 'Secreto verificado detectado' : 'Posible secreto detectado',
+      description: item.description || `TruffleHog detecto ${item.detectorName || 'un secreto'}.`,
+      severity: item.verified ? 'high' : 'medium',
+      confidence: item.verified ? 'high' : 'medium',
+      isVulnerability: true,
+      affected_asset: target,
+      affected_url: item.source || item.affected_url || null,
+      evidence: item.evidence || item.detectorName || 'TruffleHog detecto un posible secreto.',
+      recommendation: item.recommendation || 'Revocar y rotar el secreto si es real, y eliminarlo del recurso publico.',
+      verified: Boolean(item.verified),
+      detectorName: item.detectorName || null,
+      raw_reference: item.raw_reference || JSON.stringify(item).slice(0, 1200)
+    })),
+    'trufflehog',
+    target
+  );
 }
 
 function clasificarEndpointSensible(url) {
   const lower = String(url || '').toLowerCase();
   const path = obtenerPath(url);
 
-  if (lower.includes('swagger') || lower.includes('/api-doc') || lower.includes('openapi')) {
-    return {
-      title: 'Documentacion de API expuesta',
-      severity: 'medium',
-      evidence: 'Ruta compatible con Swagger/OpenAPI descubierta por Katana.',
-      impact: '',
-      recommendation: ''
-    };
+  if (!url || esAssetEstatico(url)) return null;
+  if (esRutaRuidosa(url)) {
+    console.log(`[Clasificador] descartado por ruta irrelevante: ${url}`);
+    return null;
   }
 
-  if (path.includes('admin')) {
-    return {
-      title: 'Ruta administrativa expuesta',
-      severity: 'medium',
-      evidence: 'Ruta con patron administrativo descubierta por Katana.',
-      impact: '',
-      recommendation: ''
-    };
-  }
+  if (
+    path.endsWith('/swagger/index.html') ||
+    path === '/docs' ||
+    path.includes('/docs/') ||
+    path.includes('/api-docs') ||
+    path.includes('swagger') ||
+    path.includes('openapi')
+  ) {
+    const swaggerJson = path.endsWith('/swagger.json') || path.endsWith('/openapi.json');
+    const clave = swaggerJson ? 'swagger-json' : path.includes('/api-docs') ? 'api-docs' : path.includes('openapi') ? 'openapi' : 'swagger';
 
-  if (path.includes('login') || path.includes('signin')) {
-    return {
-      title: 'Formulario de autenticacion identificado',
+    const resultado = {
+      title: tituloSuperficie(clave, swaggerJson),
       severity: 'low',
-      evidence: 'Ruta de autenticacion descubierta durante el rastreo.',
+      category: swaggerJson ? 'swagger-json' : 'suspicious',
+      evidence: swaggerJson
+        ? 'Esquema Swagger/OpenAPI descubierto por Katana. Es exposicion informativa, no vulnerabilidad confirmada.'
+        : 'Ruta compatible con Swagger/OpenAPI descubierta por Katana. Es superficie util, no vulnerabilidad confirmada.',
       impact: '',
-      recommendation: ''
+      recommendation: recomendacionSuperficie(clave)
     };
+
+    console.log(`[Clasificador] superficie util: ${url}`);
+    return resultado;
+  }
+
+  const palabra = esAdminReal(url)
+    ? 'admin'
+    : PALABRAS_SENSIBLES.find(token => {
+        const regex = new RegExp(`(^|[/?&=._-])${token}([/?&=._-]|$)`, 'i');
+        return regex.test(lower);
+      });
+
+  if (palabra) {
+    const resultado = {
+      title: tituloSuperficie(palabra),
+      severity: 'low',
+      category: 'suspicious',
+      evidence: `Ruta con patron sensible "${palabra}" descubierta por Katana. Requiere revision manual, pero no es una vulnerabilidad confirmada.`,
+      impact: '',
+      recommendation: recomendacionSuperficie(palabra)
+    };
+
+    console.log(`[Clasificador] superficie util: ${url}`);
+    return resultado;
   }
 
   return null;
@@ -284,19 +512,26 @@ function findingsKatana(toolResult, target) {
   const vistos = new Set();
   const findings = [];
 
-  urls.forEach(url => {
+  urls.forEach(item => {
+    const url = typeof item === 'string' ? item : item.url;
+    const key = normalizarUrlSuperficie(url);
+
+    if (!url || vistos.has(key)) return;
+    vistos.add(key);
+
     const clasificacion = clasificarEndpointSensible(url);
 
-    if (!clasificacion || vistos.has(url)) return;
-    vistos.add(url);
+    if (!clasificacion) return;
 
     findings.push({
       id: `katana-surface-${findings.length + 1}`,
       tool: 'katana',
+      type: 'surface',
+      category: clasificacion.category || 'suspicious',
       title: clasificacion.title,
       description: `${clasificacion.title} en ${url}.`,
       severity: clasificacion.severity,
-      confidence: 'possible',
+      confidence: 'low',
       cvss: null,
       cwe: null,
       affected_asset: target,

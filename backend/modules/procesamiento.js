@@ -69,18 +69,26 @@ function buscarResultadoSqlmap(url, herramientas) {
 }
 
 function parsearEndpoint(url, herramientas = {}, hallazgos = []) {
-  const parametros = obtenerParametros(url);
-  const httpx = buscarInfoHttpx(url, herramientas);
-  const nuclei = buscarHallazgosNuclei(url, hallazgos);
-  const dalfox = buscarHallazgosDalfox(url, herramientas);
-  const sqlmap = buscarResultadoSqlmap(url, herramientas);
+  const endpoint = typeof url === 'object' ? url : { url };
+  const endpointUrl = endpoint.url;
+  const parametros = endpoint.queryParams || endpoint.parametros || obtenerParametros(endpointUrl);
+  const httpx = buscarInfoHttpx(endpointUrl, herramientas);
+  const nuclei = buscarHallazgosNuclei(endpointUrl, hallazgos);
+  const dalfox = buscarHallazgosDalfox(endpointUrl, herramientas);
+  const sqlmap = buscarResultadoSqlmap(endpointUrl, herramientas);
 
   return {
-    url,
-    path: obtenerPath(url),
+    url: endpointUrl,
+    path: endpoint.path || obtenerPath(endpointUrl),
     tieneParametros: parametros.length > 0,
+    hasParams: parametros.length > 0,
     parametros,
-    categoria: categorizarEndpoint(url),
+    queryParams: parametros,
+    sourceTool: endpoint.sourceTool || 'katana',
+    status: endpoint.status || httpx?.statusCode || null,
+    contentType: endpoint.contentType || httpx?.contentType || null,
+    categoria: endpoint.categoria || endpoint.category || categorizarEndpoint(endpointUrl),
+    category: endpoint.category || endpoint.categoria || categorizarEndpoint(endpointUrl),
 
     evidencias: {
       http: httpx

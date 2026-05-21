@@ -12,6 +12,7 @@ const {
 const MODEL = process.env.OLLAMA_MODEL || 'llama3';
 const OLLAMA_REINTENTOS = 3;
 const INTENTOS_ENRIQUECIMIENTO_IA = Number(process.env.IA_INTENTOS_ENRIQUECIMIENTO || 3);
+const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS || 0);
 
 function construirOllamaUrl() {
   const host = process.env.OLLAMA_HOST || 'localhost';
@@ -62,19 +63,23 @@ function postJsonSinTimeout(url, body) {
     const parsed = new URL(url);
     const payload = JSON.stringify(body);
     const client = parsed.protocol === 'https:' ? https : http;
+    const requestOptions = {
+      hostname: parsed.hostname,
+      port: parsed.port,
+      path: `${parsed.pathname}${parsed.search}`,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload)
+      }
+    };
+
+    if (OLLAMA_TIMEOUT_MS > 0) {
+      requestOptions.timeout = OLLAMA_TIMEOUT_MS;
+    }
 
     const req = client.request(
-      {
-        hostname: parsed.hostname,
-        port: parsed.port,
-        path: `${parsed.pathname}${parsed.search}`,
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(payload)
-        },
-        timeout: 0
-      },
+      requestOptions,
       res => {
         const chunks = [];
 
@@ -96,7 +101,11 @@ function postJsonSinTimeout(url, body) {
       }
     );
 
-    req.setTimeout(0);
+    if (OLLAMA_TIMEOUT_MS > 0) {
+      req.setTimeout(OLLAMA_TIMEOUT_MS, () => req.destroy(new Error('timeout conectando con Ollama')));
+    } else {
+      req.setTimeout(0);
+    }
     req.on('error', reject);
     req.write(payload);
     req.end();
@@ -168,8 +177,9 @@ function limitarTexto(texto = '', max = 2500) {
 }
 
 function promptHerramienta(tool, target, payload) {
-  return `Devuelve SOLO JSON valido con esta forma: {"findings":[{"id":"","tool":"${tool}","title":"","description":"","severity":"critical|high|medium|low|info","confidence":"confirmed|probable|possible","cvss":null,"cwe":null,"affected_asset":"","affected_url":null,"evidence":"","impact":"","recommendation":"","false_positive_risk":"low|medium|high","raw_reference":null}]}.
+  return `Devuelve SOLO JSON valido con esta forma: {"findings":[{"titulo":"","criticidad":"info|baja|media|alta|critica","confianza":"baja|media|alta","es_vulnerabilidad":true,"posible_falso_positivo":false,"motivo_falso_positivo":"","impacto":"","recomendacion":"","evidencia_resumida":""}]}.
 Si no hay vulnerabilidades reales, devuelve {"findings":[]}.
+No conviertas fingerprints, WAF detect, wildcard DNS o tecnologias detectadas en vulnerabilidades.
 Objetivo: ${target}. Herramienta: ${tool}.
 Datos:
 ${limitarTexto(JSON.stringify(payload))}`;
@@ -207,10 +217,14 @@ function compactarFindingParaIA(finding) {
   return {
     id: finding.id,
     tool: finding.tool,
+    type: finding.type,
     title: finding.title,
     description: finding.description,
     severity: finding.severity,
     confidence: finding.confidence,
+    isVulnerability: finding.isVulnerability,
+    isFalsePositiveLikely: finding.isFalsePositiveLikely,
+    falsePositiveReason: finding.falsePositiveReason,
     cwe: finding.cwe,
     affected_asset: finding.affected_asset,
     affected_url: finding.affected_url,
@@ -239,16 +253,27 @@ ${limitarTexto(JSON.stringify(findings), 3200)}`;
 function promptImpactoRecomendacionIndividual(target, tool, finding) {
   return `Analiza SOLO esta vulnerabilidad concreta.
 Devuelve SOLO JSON valido con este formato exacto:
-{"items":[{"id":"${finding.id}","impact":"","recommendation":""}]}
+{
+  "titulo": "",
+  "criticidad": "info|baja|media|alta|critica",
+  "confianza": "baja|media|alta",
+  "es_vulnerabilidad": true,
+  "posible_falso_positivo": false,
+  "motivo_falso_positivo": "",
+  "impacto": "",
+  "recomendacion": "",
+  "evidencia_resumida": ""
+}
 
 Reglas obligatorias:
-- Conserva exactamente el id "${finding.id}".
-- impact debe explicar el impacto de ESTE caso, no de la vulnerabilidad en general.
-- recommendation debe explicar la correccion de ESTE caso, no una recomendacion generica.
-- impact y recommendation deben mencionar datos concretos presentes en el hallazgo: URL, ruta, parametro, payload, servicio o evidencia.
+- No conviertas fingerprints, WAF detect, wildcard DNS o tecnologias detectadas en vulnerabilidades.
+- Si el hallazgo recibido no es una vulnerabilidad, es_vulnerabilidad debe ser false y criticidad debe ser info.
+- impacto debe explicar el impacto de ESTE caso, no de la vulnerabilidad en general.
+- recomendacion debe explicar la correccion de ESTE caso, no una recomendacion generica.
+- impacto y recomendacion deben mencionar datos concretos presentes en el hallazgo: URL, ruta, parametro, payload, servicio o evidencia.
 - Si hay parametro, mencionalo por nombre.
 - Si hay payload, menciona el tipo de payload o contexto donde se refleja.
-- No dejes impact ni recommendation vacios.
+- No dejes impacto ni recomendacion vacios si es_vulnerabilidad es true.
 - Si la evidencia es limitada, redacta una valoracion prudente basada solo en lo observado.
 - No inventes CVE, CVSS, CWE ni datos no presentes.
 
@@ -262,6 +287,15 @@ function extraerItemsImpacto(texto) {
   const parsed = parsearJsonIAFlexible(texto);
 
   if (Array.isArray(parsed)) return parsed;
+
+  if (parsed && typeof parsed === 'object' && (
+    parsed.impacto ||
+    parsed.recomendacion ||
+    parsed.es_vulnerabilidad !== undefined ||
+    parsed.titulo
+  )) {
+    return [parsed];
+  }
 
   const items = parsed.items ||
     parsed.findings ||
@@ -326,13 +360,18 @@ function esTextoConcreto(finding, texto) {
 function aplicarImpactosIA(findings, itemsIA) {
   const mapa = new Map();
 
-  itemsIA.forEach(item => {
-    const id = limpiarCampoIA(item.id);
+  itemsIA.forEach((item, index) => {
+    const id = limpiarCampoIA(item.id) || findings[index]?.id;
     if (!id) return;
 
     mapa.set(id, {
+      title: limpiarCampoIA(item.title || item.titulo),
       impact: limpiarCampoIA(item.impact || item.impacto),
-      recommendation: limpiarCampoIA(item.recommendation || item.recomendacion)
+      recommendation: limpiarCampoIA(item.recommendation || item.recomendacion),
+      evidence: limpiarCampoIA(item.evidencia_resumida),
+      isVulnerability: typeof item.es_vulnerabilidad === 'boolean' ? item.es_vulnerabilidad : undefined,
+      isFalsePositiveLikely: typeof item.posible_falso_positivo === 'boolean' ? item.posible_falso_positivo : undefined,
+      falsePositiveReason: limpiarCampoIA(item.motivo_falso_positivo)
     });
   });
 
@@ -349,10 +388,46 @@ function aplicarImpactosIA(findings, itemsIA) {
 
     return {
       ...finding,
+      title: finding.title,
       impact: enriquecido.impact,
-      recommendation: enriquecido.recommendation
+      recommendation: enriquecido.recommendation,
+      evidence: enriquecido.evidence || finding.evidence,
+      isVulnerability: enriquecido.isVulnerability ?? finding.isVulnerability,
+      isFalsePositiveLikely: enriquecido.isFalsePositiveLikely ?? finding.isFalsePositiveLikely,
+      falsePositiveReason: enriquecido.falsePositiveReason || finding.falsePositiveReason
     };
   });
+}
+
+function fallbackTecnico(finding) {
+  const tipo = String(finding.type || finding.tool || '').toLowerCase();
+  const titulo = String(finding.title || '').toLowerCase();
+
+  if (tipo.includes('xss') || titulo.includes('xss')) {
+    return {
+      impact: 'Puede permitir ejecucion de JavaScript en el navegador de la victima dentro del contexto del sitio.',
+      recommendation: 'Escapar la salida HTML, validar entradas y aplicar una Content Security Policy restrictiva.'
+    };
+  }
+
+  if (tipo.includes('sqli') || titulo.includes('sql injection')) {
+    return {
+      impact: 'Puede permitir consultar o modificar datos mediante manipulacion de parametros enviados a la base de datos.',
+      recommendation: 'Usar consultas parametrizadas, validar tipos de entrada y limitar privilegios de la cuenta de base de datos.'
+    };
+  }
+
+  if (tipo.includes('secret') || titulo.includes('secreto')) {
+    return {
+      impact: 'La exposicion de secretos puede permitir acceso no autorizado a servicios, APIs o datos internos.',
+      recommendation: 'Revocar y rotar el secreto afectado, retirarlo del recurso publico y moverlo a un almacen seguro.'
+    };
+  }
+
+  return {
+    impact: finding.impact || 'Requiere revision tecnica para valorar el impacto real con la evidencia disponible.',
+    recommendation: finding.recommendation || 'Revisar el endpoint o recurso indicado, validar su necesidad de exposicion y aplicar controles de acceso si procede.'
+  };
 }
 
 function normalizarComparacion(texto) {
@@ -397,7 +472,14 @@ async function enriquecerFindingsIA(target, tool, findings) {
       enriquecidos.push(await enriquecerFindingIndividual(target, tool, finding));
     } catch (error) {
       console.error(`IA no pudo completar ${tool}/${finding.id}:`, error.message);
-      enriquecidos.push(finding);
+      const fallback = fallbackTecnico(finding);
+      enriquecidos.push({
+        ...finding,
+        impact: finding.impact || fallback.impact,
+        recommendation: finding.recommendation || fallback.recommendation,
+        ai_status: 'failed',
+        ai_error: 'No se pudo conectar con Ollama'
+      });
     }
   }
 

@@ -1,4 +1,4 @@
-const CONFIDENCES = ['confirmed', 'probable', 'possible'];
+const CONFIDENCES = ['high', 'medium', 'low', 'confirmed', 'probable', 'possible'];
 const FALSE_POSITIVE_RISKS = ['low', 'medium', 'high'];
 
 function limpiarTexto(valor, fallback = '') {
@@ -35,6 +35,20 @@ function normalizarEnum(valor, permitidos, fallback) {
   return permitidos.includes(lower) ? lower : fallback;
 }
 
+function normalizarConfianza(valor, fallback = 'low') {
+  const lower = limpiarTexto(valor, fallback).toLowerCase();
+  const mapa = {
+    confirmed: 'high',
+    probable: 'medium',
+    possible: 'low',
+    alta: 'high',
+    media: 'medium',
+    baja: 'low'
+  };
+
+  return mapa[lower] || (['high', 'medium', 'low'].includes(lower) ? lower : fallback);
+}
+
 function normalizarCvss(valor) {
   if (valor === null || valor === undefined || valor === '') return null;
   const numero = Number(valor);
@@ -58,19 +72,32 @@ function normalizarFinding(item = {}, tool = 'otra', index = 0, target = '') {
   const affectedUrl = limpiarTexto(item.affected_url || item.url || item.endpoint, null);
 
   return {
+    ...item,
     id: limpiarTexto(item.id, crearId(tool, index, title)),
     tool: limpiarTexto(item.tool || item.herramienta, tool).toLowerCase(),
     title,
     description: limpiarTexto(item.description || item.descripcion, 'Hallazgo identificado durante el analisis automatizado.'),
     severity,
-    confidence: normalizarEnum(item.confidence || item.confianza, CONFIDENCES, 'possible'),
+    confidence: normalizarConfianza(item.confidence || item.confianza, 'low'),
     cvss: normalizarCvss(item.cvss),
     cwe: limpiarTexto(item.cwe, null),
     affected_asset: limpiarTexto(item.affected_asset || item.asset || item.activo || target, target),
     affected_url: affectedUrl,
-    evidence: limpiarTexto(item.evidence || item.evidencia, 'Sin evidencia detallada disponible.'),
+    evidence: limpiarTexto(item.evidence || item.evidencia || item.evidencia_resumida, 'Sin evidencia detallada disponible.'),
     impact: limpiarTexto(item.impact || item.impacto, ''),
     recommendation: limpiarTexto(item.recommendation || item.recomendacion, ''),
+    type: limpiarTexto(item.type || item.tipo, severity === 'info' ? 'reconocimiento' : 'vulnerability'),
+    isVulnerability: typeof item.isVulnerability === 'boolean'
+      ? item.isVulnerability
+      : typeof item.es_vulnerabilidad === 'boolean'
+        ? item.es_vulnerabilidad
+        : severity !== 'info',
+    isFalsePositiveLikely: typeof item.isFalsePositiveLikely === 'boolean'
+      ? item.isFalsePositiveLikely
+      : typeof item.posible_falso_positivo === 'boolean'
+        ? item.posible_falso_positivo
+        : false,
+    falsePositiveReason: limpiarTexto(item.falsePositiveReason || item.motivo_falso_positivo, ''),
     false_positive_risk: normalizarEnum(
       item.false_positive_risk || item.riesgo_falso_positivo,
       FALSE_POSITIVE_RISKS,

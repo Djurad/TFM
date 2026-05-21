@@ -147,6 +147,47 @@ http://localhost:3000
 
 ---
 
+## Pruebas manuales de herramientas
+
+Estos comandos permiten validar el pipeline por separado antes de ejecutar el analisis completo desde la interfaz:
+
+```bash
+subfinder -d demo.owasp-juice.shop
+echo demo.owasp-juice.shop | httpx -title -tech-detect -status-code
+katana -u https://demo.owasp-juice.shop
+sqlmap -u "https://testphp.vulnweb.com/listproducts.php?cat=1" --batch
+nuclei -u https://demo.owasp-juice.shop -severity low,medium,high,critical
+gau demo.owasp-juice.shop
+gf xss urls.txt
+feroxbuster -u https://demo.owasp-juice.shop --depth 2 --silent --json
+trufflehog filesystem ./tmp_scan --json
+```
+
+Por defecto, Nuclei excluye resultados informativos y tags ruidosos como `dns`, `tech`, `waf`, `cdn` y `favicon`. Para incluir severidad `info` en modo avanzado sin tratarla como vulnerabilidad:
+
+```bash
+NUCLEI_INCLUDE_INFO=true node server.js
+```
+
+Sqlmap solo se ejecuta automaticamente sobre URLs con parametros. Si no se encuentran parametros, el backend devuelve el aviso `sqlmap no se ejecuto porque no se encontraron parametros`. Para permitir un crawl ligero de sqlmap cuando no haya parametros:
+
+```bash
+SQLMAP_CRAWL_IF_NO_PARAMS=true node server.js
+```
+
+Limites configurables para mantener el analisis acotado:
+
+```bash
+MAX_GAU_URLS=500
+MAX_FEROX_URLS=100
+MAX_DALFOX_URLS=50
+MAX_SQLMAP_URLS=10
+MAX_JS_SECRET_SCAN=20
+TOOL_TIMEOUT_SECONDS=120
+```
+
+---
+
 ## Tecnologías utilizadas
 
 - Node.js + Express  

@@ -105,7 +105,7 @@
 
     .summary {
       display: grid;
-      grid-template-columns: repeat(5, minmax(120px, 1fr));
+      grid-template-columns: repeat(6, minmax(120px, 1fr));
       gap: 10px;
       margin: 18px 0;
     }
@@ -120,9 +120,13 @@
 
     .summary-item {
       padding: 12px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
+      display: grid;
+      gap: 6px;
+    }
+
+    .summary-total_vulnerabilidades {
+      border-color: #b42318;
+      background: #fff4f2;
     }
 
     .summary-item strong {
@@ -167,9 +171,87 @@
       gap: 14px;
     }
 
+    .result-group {
+      display: grid;
+      gap: 10px;
+      margin-bottom: 6px;
+    }
+
+    .vulnerabilities-main {
+      padding: 16px;
+      background: #fff;
+      border: 1px solid #dde3ea;
+      border-radius: 8px;
+    }
+
+    .result-group-secondary {
+      opacity: 0.92;
+    }
+
+    .group-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding-top: 8px;
+    }
+
+    .group-header h2 {
+      margin: 0;
+      font-size: 20px;
+    }
+
+    .group-header span {
+      min-width: 34px;
+      min-height: 28px;
+      display: inline-flex;
+      justify-content: center;
+      align-items: center;
+      border-radius: 999px;
+      background: #17202a;
+      color: #fff;
+      font-weight: 700;
+      font-size: 13px;
+    }
+
+    .group-header-main h2 {
+      font-size: 24px;
+    }
+
+    .group-desc {
+      margin: 0;
+      color: #51606f;
+      line-height: 1.45;
+    }
+
+    .group-list {
+      display: grid;
+      gap: 12px;
+    }
+
     .finding {
       padding: 16px;
       border-left-width: 6px;
+    }
+
+    .finding-surface,
+    .finding-info,
+    .finding-discarded {
+      padding: 12px;
+      background: #fbfcfd;
+      border-left-width: 3px;
+    }
+
+    .finding-surface h2,
+    .finding-info h2,
+    .finding-discarded h2 {
+      font-size: 16px;
+    }
+
+    .finding-surface p,
+    .finding-info p,
+    .finding-discarded p {
+      font-size: 14px;
     }
 
     .finding header {
@@ -211,6 +293,93 @@
       color: #51606f;
     }
 
+    .badge-confirmed {
+      background: #fee4e2;
+      color: #9f1b13;
+    }
+
+    .badge-possible {
+      background: #fff0d5;
+      color: #8a4b00;
+    }
+
+    .badge-surface {
+      background: #e8f1fb;
+      color: #24577a;
+    }
+
+    .badge-info {
+      background: #eef2f5;
+      color: #4a5b6b;
+    }
+
+    .badge-discarded {
+      background: #f6f7f8;
+      color: #6b7785;
+    }
+
+    .surface-details {
+      background: #f8fafc;
+      border: 1px solid #dde3ea;
+      border-radius: 8px;
+      padding: 12px;
+    }
+
+    .surface-details summary {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      cursor: pointer;
+      font-weight: 700;
+      color: #2d4154;
+    }
+
+    .surface-details summary strong {
+      min-width: 30px;
+      min-height: 24px;
+      border-radius: 999px;
+      display: inline-flex;
+      justify-content: center;
+      align-items: center;
+      background: #dbe7f3;
+      color: #24577a;
+      font-size: 13px;
+    }
+
+    .surface-details .group-desc {
+      margin: 10px 0;
+    }
+
+    .gf-candidates {
+      display: grid;
+      gap: 10px;
+      margin-top: 10px;
+    }
+
+    .candidate-block {
+      padding: 10px;
+      border: 1px solid #dde3ea;
+      border-radius: 8px;
+      background: #fff;
+    }
+
+    .candidate-block h3 {
+      margin: 0 0 8px;
+      font-size: 15px;
+    }
+
+    .candidate-block ul {
+      margin: 0;
+      padding-left: 18px;
+    }
+
+    .candidate-block li {
+      margin: 4px 0;
+      overflow-wrap: anywhere;
+      font-size: 13px;
+      color: #405162;
+    }
+
     .severity-critical {
       border-color: #b42318;
     }
@@ -237,6 +406,16 @@
       background: #fff;
       border: 1px solid #dde3ea;
       border-radius: 8px;
+    }
+
+    .notice {
+      margin: 0;
+      padding: 12px 14px;
+      background: #fff8e6;
+      border: 1px solid #efd28a;
+      border-radius: 8px;
+      color: #6a4b00;
+      font-weight: 700;
     }
 
     @media (max-width: 760px) {

@@ -154,14 +154,33 @@ Estos comandos permiten validar el pipeline por separado antes de ejecutar el an
 ```bash
 subfinder -d demo.owasp-juice.shop
 echo demo.owasp-juice.shop | httpx -title -tech-detect -status-code
-katana -u https://demo.owasp-juice.shop
-sqlmap -u "https://testphp.vulnweb.com/listproducts.php?cat=1" --batch
-nuclei -u https://demo.owasp-juice.shop -severity low,medium,high,critical
+feroxbuster -u https://demo.owasp-juice.shop --depth 1 --silent --json --time-limit 60s
+echo https://demo.owasp-juice.shop | katana -silent -depth 3 -jc -kf all
 gau demo.owasp-juice.shop
 gf xss urls.txt
-feroxbuster -u https://demo.owasp-juice.shop --depth 2 --silent --json
+nuclei -u https://demo.owasp-juice.shop -severity low,medium,high,critical
+dalfox pipe --silence --format json < urls.txt
+sqlmap -u "https://testphp.vulnweb.com/listproducts.php?cat=1" --batch
 trufflehog filesystem ./tmp_scan --json
 ```
+
+El orden del pipeline principal es: `subfinder`, `httpx`, `feroxbuster`, `katana`, `gau`, `gf`, `nuclei`, `dalfox`, `sqlmap`, `trufflehog`.
+
+Dependencias externas recomendadas en Linux/WSL:
+
+```bash
+go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+go install github.com/projectdiscovery/httpx/cmd/httpx@latest
+go install github.com/projectdiscovery/katana/cmd/katana@latest
+go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+go install github.com/hahwul/dalfox/v2@latest
+go install github.com/lc/gau/v2/cmd/gau@latest
+go install github.com/tomnomnom/gf@latest
+cargo install feroxbuster
+curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh
+```
+
+`gf` necesita patterns en `~/.gf`; los scripts `setup.sh` y `herramientas.sh` instalan un conjunto base. En Windows nativo varias herramientas Go/Rust funcionan si estan en `PATH`, pero para TFM/demo se recomienda WSL/Linux por compatibilidad con `feroxbuster`, `gf`, `gau` y `trufflehog`.
 
 Por defecto, Nuclei excluye resultados informativos y tags ruidosos como `dns`, `tech`, `waf`, `cdn` y `favicon`. Para incluir severidad `info` en modo avanzado sin tratarla como vulnerabilidad:
 

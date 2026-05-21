@@ -1,9 +1,9 @@
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const { esAssetEstatico } = require('./clasificadorFindings');
 
-function ejecutar(comando, timeoutMs) {
+function ejecutar(binario, args, timeoutMs) {
   return new Promise((resolve, reject) => {
-    exec(comando, { timeout: timeoutMs, maxBuffer: 1024 * 1024 * 20 }, (error, stdout, stderr) => {
+    execFile(binario, args, { timeout: timeoutMs, maxBuffer: 1024 * 1024 * 20 }, (error, stdout, stderr) => {
       if (error) {
         const salida = [stderr, error.message].filter(Boolean).join('\n');
         reject(new Error(salida || 'gau fallo sin salida de error.'));
@@ -76,11 +76,10 @@ function normalizarEndpoint(url, source = 'gau') {
 async function ejecutarGau(dominio, opciones = {}) {
   const maxUrls = Number(opciones.maxUrls || process.env.MAX_GAU_URLS || 500);
   const timeoutMs = Number(opciones.timeoutMs || (Number(process.env.TOOL_TIMEOUT_SECONDS || 120) * 1000));
-  const comando = `gau ${dominio}`;
 
   try {
-    console.log(`[gau] comando ejecutado: ${comando}`);
-    const raw = await ejecutar(comando, timeoutMs);
+    console.log(`[gau] dominio analizado: ${dominio}`);
+    const raw = await ejecutar('gau', [dominio], timeoutMs);
     const urls = deduplicar(parsearLineas(raw))
       .filter(url => /^https?:\/\//i.test(url))
       .filter(url => !esAssetEstatico(url))

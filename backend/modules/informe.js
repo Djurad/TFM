@@ -102,6 +102,20 @@ function generarAnexoGf(gfCandidates = {}) {
   return `## Anexo: candidatos priorizados por GF\n\nGF se usa para priorizacion y no confirma vulnerabilidades.\n\n${lineas.join('\n')}\n`;
 }
 
+function generarAnexoHerramienta(titulo, findings, fallback) {
+  if (!findings.length) return `## ${titulo}\n\n${fallback}\n`;
+
+  const lineas = findings.slice(0, 50).map(finding => [
+    `- ${finding.title}`,
+    `  - Activo: ${finding.affected_url || finding.affected_asset || 'sin activo'}`,
+    `  - Tipo: ${finding.type || 'n/a'}`,
+    `  - Severidad/confianza: ${finding.severity}/${finding.confidence}`,
+    `  - Evidencia: ${finding.evidence || 'Sin evidencia detallada.'}`
+  ].join('\n'));
+
+  return `## ${titulo}\n\n${lineas.join('\n')}\n`;
+}
+
 async function generarInformeDesdeFindings(target, findings, contexto = {}) {
   const confirmadas = findings.filter(esConfirmada);
   const posibles = findings.filter(esPosible);
@@ -115,13 +129,21 @@ async function generarInformeDesdeFindings(target, findings, contexto = {}) {
     f.isFalsePositiveLikely ||
     (f.isVulnerability === true && f.confidence === 'low')
   );
+  const feroxFindings = findings.filter(f => f.tool === 'feroxbuster');
+  const gauFindings = findings.filter(f => f.tool === 'gau');
+  const gfFindings = findings.filter(f => f.tool === 'gf');
+  const trufflehogFindings = findings.filter(f => f.tool === 'trufflehog');
 
   const secciones = [
     generarResumenEjecutivo(target, confirmadas, posibles, superficie, reconocimiento, descartados, contexto),
     generarSeccion('Vulnerabilidades confirmadas', confirmadas, 'No se identificaron vulnerabilidades confirmadas.'),
     generarSeccion('Posibles vulnerabilidades', posibles, 'No se identificaron posibles vulnerabilidades con evidencia suficiente.'),
     generarRecomendacionesPrioritarias(confirmadas, posibles),
+    generarAnexoHerramienta('Anexo: Feroxbuster - rutas descubiertas y sensibles', feroxFindings, 'Feroxbuster no registro rutas destacables o no se ejecuto.'),
+    generarAnexoHerramienta('Anexo: GAU - URLs historicas y parametrizadas', gauFindings, 'GAU no registro URLs historicas destacables o no se ejecuto.'),
     generarAnexoGf(contexto.gfCandidates || {}),
+    generarAnexoHerramienta('Anexo: GF - candidatos por patron', gfFindings, 'GF no registro candidatos o no se ejecuto.'),
+    generarAnexoHerramienta('Anexo: TruffleHog - secretos detectados', trufflehogFindings, 'TruffleHog no detecto secretos o no se ejecuto. Los valores completos de secretos nunca se incluyen en el informe.'),
     `## Anexo: superficie descubierta\n\n${listaAnexo(superficie, 'No se identifico superficie sensible destacable.')}\n`,
     `## Anexo: reconocimiento informativo\n\n${listaAnexo(reconocimiento, 'No se identificaron hallazgos informativos relevantes.')}\n`,
     `## Anexo: falsos positivos o descartados\n\n${listaAnexo(descartados, 'No hay elementos descartados relevantes.')}\n`

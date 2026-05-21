@@ -1,4 +1,4 @@
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 
 const PATRONES = {
   xss: 'xssCandidates',
@@ -29,9 +29,9 @@ const PRIORIDAD_PARAMS = [
   'step'
 ];
 
-function ejecutar(comando, input, timeoutMs) {
+function ejecutar(pattern, input, timeoutMs) {
   return new Promise((resolve, reject) => {
-    const child = exec(comando, { timeout: timeoutMs, maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
+    const child = execFile('gf', [pattern], { timeout: timeoutMs, maxBuffer: 1024 * 1024 * 10 }, (error, stdout, stderr) => {
       if (error) {
         const salida = [stderr, error.message].filter(Boolean).join('\n');
         reject(new Error(salida || 'gf fallo.'));
@@ -157,10 +157,11 @@ async function ejecutarGf(endpoints = [], opciones = {}) {
 
   let raw = '';
   let herramientaNoInstalada = false;
+  const patternErrors = [];
 
   for (const [pattern, bucket] of Object.entries(PATRONES)) {
     try {
-      const output = await ejecutar(`gf ${pattern}`, input, timeoutMs);
+      const output = await ejecutar(pattern, input, timeoutMs);
       raw += `\n# gf ${pattern}\n${output}`;
       buckets[bucket] = ordenarPorPrioridad(deduplicarPorPatron(parsearLineas(output)));
     } catch (error) {
@@ -168,6 +169,7 @@ async function ejecutarGf(endpoints = [], opciones = {}) {
         herramientaNoInstalada = true;
         break;
       }
+      patternErrors.push(`${pattern}: ${error.message.split('\n')[0]}`);
     }
   }
 
@@ -189,12 +191,25 @@ async function ejecutarGf(endpoints = [], opciones = {}) {
   console.log(`[gf] candidatos lfi: ${buckets.lfiCandidates.length}`);
   console.log(`[gf] candidatos rce: ${buckets.rceCandidates.length}`);
 
+  const metrics = construirMetricas(buckets, raw);
+  if (patternErrors.length && metrics.producidos === 0) {
+    return {
+      status: 'error',
+      raw,
+      parsed: buckets,
+      findings: [],
+      error: `gf no pudo ejecutar los patrones configurados: ${patternErrors.join(' | ')}`,
+      metrics
+    };
+  }
+
   return {
-    status: 'success',
+    status: patternErrors.length ? 'partial' : 'success',
     raw,
     parsed: buckets,
     findings: [],
-    metrics: construirMetricas(buckets, raw)
+    warning: patternErrors.length ? `Algunos patrones gf fallaron: ${patternErrors.join(' | ')}` : null,
+    metrics
   };
 }
 

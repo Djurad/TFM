@@ -174,11 +174,29 @@ function clasificarFinding(raw = {}) {
   let isFalsePositiveLikely = false;
   let falsePositiveReason = '';
 
-  if (tool === 'subfinder' || tool === 'httpx' || tool === 'gau' || tool === 'gf') {
+  if (tool === 'subfinder' || tool === 'httpx') {
     type = 'reconocimiento';
     severity = 'info';
     confidence = 'low';
     isVulnerability = false;
+    isFalsePositiveLikely = false;
+    falsePositiveReason = '';
+  }
+
+  if (tool === 'gau') {
+    type = raw.type === 'surface' ? 'surface' : 'historical-url';
+    severity = raw.type === 'surface' ? 'low' : 'info';
+    confidence = 'low';
+    isVulnerability = false;
+    isFalsePositiveLikely = false;
+    falsePositiveReason = '';
+  }
+
+  if (tool === 'gf') {
+    type = 'gf-candidate';
+    severity = ['medium', 'low'].includes(severityOriginal) ? severityOriginal : 'low';
+    confidence = normalizarConfianza(raw.confidence || raw.confianza, 'medium');
+    isVulnerability = true;
     isFalsePositiveLikely = false;
     falsePositiveReason = '';
   }
@@ -273,7 +291,7 @@ function clasificarFinding(raw = {}) {
   }
 
   if (tool === 'trufflehog') {
-    type = 'secret';
+    type = 'exposed-secret';
     severity = raw.verified ? 'high' : 'medium';
     confidence = raw.verified ? 'high' : 'medium';
     isVulnerability = true;
@@ -314,7 +332,7 @@ function clasificarFindings(findings = []) {
 function debeEnviarIA(finding) {
   if (!finding || finding.isVulnerability !== true) return false;
   if (['subfinder', 'httpx', 'katana', 'gau', 'gf'].includes(finding.tool)) return false;
-  if (finding.tool === 'trufflehog') return finding.type === 'secret' && ['medium', 'high'].includes(finding.confidence);
+  if (finding.tool === 'trufflehog') return finding.type === 'exposed-secret' && ['medium', 'high'].includes(finding.confidence);
   if (esAssetEstatico(obtenerUrlFinding(finding))) return false;
   if (finding.type === 'reconocimiento' || finding.type === 'surface' || finding.type === 'discarded') return false;
   if (finding.tool === 'nuclei') {

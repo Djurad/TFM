@@ -1,7 +1,7 @@
 const path = require('path');
 const http = require('http');
 const https = require('https');
-require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+require('dotenv').config({ path: path.join(__dirname, '..', '.env'), override: true });
 
 const {
   extraerFindingsDesdeRespuestaIA,

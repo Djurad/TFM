@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env'), override: true });
 const { generarPdfRespuesta, generarPdfDesdeInforme } = require('./utils/pdf');
 const { ejecutarReconocimiento } = require('./modules/reconocimiento');
 const { enriquecerFindingsIA } = require('./modules/ia');
@@ -76,6 +77,27 @@ function construirResumenUI(grupos) {
     reconocimiento,
     descartados
   };
+}
+
+function claveFinding(finding = {}) {
+  return [
+    finding.tool || '',
+    finding.type || '',
+    finding.vulnerability_type || '',
+    finding.title || '',
+    finding.affected_url || finding.affected_asset || ''
+  ].join('|').toLowerCase();
+}
+
+function deduplicarFindings(findings = []) {
+  const mapa = new Map();
+
+  findings.forEach(finding => {
+    const key = claveFinding(finding);
+    if (!mapa.has(key)) mapa.set(key, finding);
+  });
+
+  return Array.from(mapa.values());
 }
 
 function resumenHerramientas(reconocimiento, toolResults, findings) {
@@ -218,7 +240,8 @@ app.post('/analizar', async (req, res) => {
       findings.push(...(result.findings || []));
     }
 
-    const grupos = agruparFindings(findings);
+    const findingsDeduplicados = deduplicarFindings(findings);
+    const grupos = agruparFindings(findingsDeduplicados);
     const findingsInforme = [
       ...grupos.confirmadas,
       ...grupos.posibles
@@ -232,7 +255,7 @@ app.post('/analizar', async (req, res) => {
     const respuesta = {
       target: reconocimiento.target,
       status: 'completed',
-      findings,
+      findings: findingsDeduplicados,
       findings_reportables: findingsInforme,
       groups: grupos,
       gf_candidates: construirCandidatosGf(toolResults),
@@ -242,7 +265,7 @@ app.post('/analizar', async (req, res) => {
           serializarToolResult(result)
         ])
       ),
-      tool_counters: resumenHerramientas(reconocimiento, toolResults, findings),
+      tool_counters: resumenHerramientas(reconocimiento, toolResults, findingsDeduplicados),
       sqlmap_notice: toolResults.sqlmap?.status === 'skipped' ? toolResults.sqlmap.error : null,
       ai_notice: findings.some(f => f.ai_status === 'failed')
         ? 'La IA no respondió, se muestra análisis técnico básico.'

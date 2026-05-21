@@ -1,10 +1,10 @@
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const { esAssetEstatico } = require('./clasificadorFindings');
 const { normalizarEndpoint } = require('./gau');
 
-function ejecutar(comando, timeoutMs) {
+function ejecutar(args, timeoutMs) {
   return new Promise((resolve, reject) => {
-    exec(comando, { timeout: timeoutMs, maxBuffer: 1024 * 1024 * 20 }, (error, stdout, stderr) => {
+    execFile('feroxbuster', args, { timeout: timeoutMs, maxBuffer: 1024 * 1024 * 20 }, (error, stdout, stderr) => {
       if (error) {
         if (stdout && stdout.trim()) return resolve(stdout);
         reject(new Error([stderr, error.message].filter(Boolean).join('\n') || 'feroxbuster fallo.'));
@@ -56,7 +56,7 @@ function esRutaInteresante(url = '') {
   const lower = String(url).toLowerCase();
   return /\/admin(\/|$|\?)/i.test(lower) ||
     /(^|[/?&=])admin([/?&=]|$)/i.test(lower) ||
-    ['login', 'upload', 'backup', 'config', 'debug', 'actuator', 'phpmyadmin', '.git', '.env']
+    ['login', 'upload', 'backup', 'config', 'debug', 'actuator', 'phpmyadmin', '.git', '.env', 'swagger', 'openapi', 'api-docs']
       .some(token => lower.includes(token));
 }
 
@@ -99,8 +99,18 @@ async function ejecutarFeroxbuster(activos = [], opciones = {}) {
     intentos += 1;
 
     try {
-      const wordlist = process.env.FEROX_WORDLIST ? ` -w "${process.env.FEROX_WORDLIST}"` : '';
-      const raw = await ejecutar(`feroxbuster -u "${activo}" --depth 1 --silent --json --time-limit 60s --threads 20 -k${wordlist}`, timeoutMs);
+      const args = [
+        '-u', activo,
+        '--depth', '1',
+        '--silent',
+        '--json',
+        '--time-limit', '60s',
+        '--threads', '10',
+        '-k'
+      ];
+      if (process.env.FEROX_WORDLIST) args.push('-w', process.env.FEROX_WORDLIST);
+
+      const raw = await ejecutar(args, timeoutMs);
       rawParts.push(raw);
       parsearJsonLines(raw)
         .map(endpointDesdeFerox)

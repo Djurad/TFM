@@ -1,4 +1,4 @@
-const { exec } = require('child_process');
+const { exec, execFile, spawn } = require('child_process');
 const { esAssetEstatico } = require('./clasificadorFindings');
 const { ejecutarGau } = require('./gau');
 const { ejecutarFeroxbuster } = require('./feroxbuster');
@@ -29,6 +29,76 @@ function ejecutarComando(comando, opciones = {}) {
         resolve(stdout);
       }
     );
+  });
+}
+
+function ejecutarBinario(binario, args = [], opciones = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(
+      binario,
+      args,
+      {
+        timeout: opciones.timeout || 180000,
+        maxBuffer: opciones.maxBuffer || 1024 * 1024 * 20,
+        cwd: opciones.cwd || process.cwd()
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          if (stdout && stdout.trim()) return resolve(stdout);
+          if (opciones.permitirFalloSinSalida) return resolve('');
+
+          const detalles = [
+            stderr && stderr.trim(),
+            error.message && error.message.trim()
+          ].filter(Boolean);
+
+          return reject(new Error(detalles.join('\n') || `${binario} fallo sin salida de error.`));
+        }
+
+        resolve(stdout || '');
+      }
+    );
+  });
+}
+
+function ejecutarConInput(binario, args = [], input = '', opciones = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(binario, args, {
+      shell: false,
+      cwd: opciones.cwd || process.cwd()
+    });
+
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGTERM');
+    }, opciones.timeout || 180000);
+
+    child.stdout.on('data', data => {
+      stdout += data.toString();
+      if (stdout.length > (opciones.maxBuffer || 1024 * 1024 * 20)) child.kill('SIGTERM');
+    });
+    child.stderr.on('data', data => {
+      stderr += data.toString();
+    });
+    child.on('error', error => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.on('close', code => {
+      clearTimeout(timeout);
+      if (timedOut) return reject(new Error(`${binario} excedio el tiempo limite.`));
+      if (code !== 0 && !(opciones.permitirFalloSinSalida && !stdout.trim())) {
+        if (stdout && stdout.trim()) return resolve(stdout);
+        return reject(new Error([stderr.trim(), `${binario} finalizo con codigo ${code}`].filter(Boolean).join('\n')));
+      }
+      resolve(stdout);
+    });
+
+    child.stdin.write(input || '');
+    child.stdin.end();
   });
 }
 
@@ -420,6 +490,39 @@ async function ejecutarReconocimiento(targetOriginal) {
     }
   }
 
+  async function ejecutarHerramientaInput(nombre, binario, args, input, parser = parsearLineas, opciones = {}) {
+    try {
+      registrarPaso(nombre, 'ejecutando herramienta', { entrada: target, binario, args });
+      const raw = await ejecutarConInput(binario, args, input, {
+        timeout: timeoutMs,
+        permitirFalloSinSalida: nombre === 'nuclei' || opciones.permitirFalloSinSalida
+      });
+      const parsed = parser(raw);
+      const parsedCount = Array.isArray(parsed) ? parsed.length : 0;
+      registrarPaso(nombre, 'resultados producidos', { resultados: parsedCount });
+
+      toolResults[nombre] = {
+        status: 'success',
+        raw,
+        parsed,
+        findings: []
+      };
+
+      return raw;
+    } catch (error) {
+      toolResults[nombre] = {
+        status: 'error',
+        raw: '',
+        parsed: [],
+        findings: [],
+        error: error.message
+      };
+
+      console.error(`Error en ${nombre}:`, error.message);
+      return '';
+    }
+  }
+
   registrarPaso('normalizacion', 'entrada normalizada', {
     original: entrada.original,
     dominioLimpio: target,
@@ -430,10 +533,29 @@ async function ejecutarReconocimiento(targetOriginal) {
 
   const subfinderOutput = targetLocal
     ? ''
-    : await ejecutarHerramienta(
-        'subfinder',
-        `subfinder -d ${target} -silent`
-      );
+    : await (async () => {
+        try {
+          registrarPaso('subfinder', 'ejecutando herramienta', { entrada: target, binario: 'subfinder' });
+          const raw = await ejecutarBinario('subfinder', ['-d', target, '-silent'], { timeout: timeoutMs });
+          toolResults.subfinder = {
+            status: 'success',
+            raw,
+            parsed: parsearLineas(raw),
+            findings: []
+          };
+          return raw;
+        } catch (error) {
+          toolResults.subfinder = {
+            status: 'error',
+            raw: '',
+            parsed: [],
+            findings: [],
+            error: error.message
+          };
+          console.error('Error en subfinder:', error.message);
+          return '';
+        }
+      })();
 
   if (targetLocal) {
     toolResults.subfinder = {
@@ -451,9 +573,11 @@ async function ejecutarReconocimiento(targetOriginal) {
 
   const inputHttpx = deduplicarUrls([...subdominios, entrada.inputUrl, entrada.baseUrl]).join('\n');
 
-  const httpxOutput = await ejecutarHerramienta(
+  const httpxOutput = await ejecutarHerramientaInput(
     'httpx',
-    `printf "%s\n" "${inputHttpx}" | httpx -silent -json -title -status-code -tech-detect -web-server -content-length -content-type -location -follow-redirects -no-color`,
+    'httpx',
+    ['-silent', '-json', '-title', '-status-code', '-tech-detect', '-web-server', '-content-length', '-content-type', '-location', '-follow-redirects', '-no-color'],
+    inputHttpx,
     parsearHttpxJson
   );
 
@@ -474,9 +598,11 @@ async function ejecutarReconocimiento(targetOriginal) {
   toolResults.feroxbuster = feroxResult;
 
   const katanaOutput = activos.length > 0
-    ? await ejecutarHerramienta(
+    ? await ejecutarHerramientaInput(
         'katana',
-        `printf "%s\n" "${inputKatana}" | katana -silent -depth 3 -jc -kf all`
+        'katana',
+        ['-silent', '-depth', '3', '-jc', '-kf', 'all'],
+        inputKatana
       )
     : '';
 
@@ -560,14 +686,28 @@ async function ejecutarReconocimiento(targetOriginal) {
     };
   }
 
+  const gfResult = await ejecutarGf(endpoints, { timeoutMs });
+  toolResults.gf = gfResult;
+
+  const endpointsConParametros = endpoints.filter(endpoint => endpoint.hasParams);
+  const urlsParametrizadas = endpointsConParametros.map(endpoint => endpoint.url);
+  const gfBuckets = gfResult.parsed || {};
+  const gfUtil = ['success', 'partial'].includes(gfResult.status);
+  const xssDesdeGf = gfUtil ? (gfBuckets.xssCandidates || []) : [];
+  const sqliDesdeGf = gfUtil ? (gfBuckets.sqliCandidates || []) : [];
+
   const inputNuclei = activos.join('\n');
   const severidadesNuclei = includeNucleiInfo ? 'info,low,medium,high,critical' : 'low,medium,high,critical';
   const excludeTags = 'dns,tech,waf,cdn,favicon';
 
   const nucleiOutput = activos.length > 0
-    ? await ejecutarHerramienta(
+    ? await ejecutarHerramientaInput(
         'nuclei',
-        `printf "%s\n" "${inputNuclei}" | nuclei -severity ${severidadesNuclei} -exclude-tags ${excludeTags} -silent -timeout 10 -no-color`
+        'nuclei',
+        ['-severity', severidadesNuclei, '-exclude-tags', excludeTags, '-silent', '-timeout', '10', '-no-color'],
+        inputNuclei,
+        parsearLineas,
+        { permitirFalloSinSalida: true }
       )
     : '';
 
@@ -587,14 +727,6 @@ async function ejecutarReconocimiento(targetOriginal) {
     includeInfo: includeNucleiInfo
   });
 
-  const gfResult = await ejecutarGf(endpoints, { timeoutMs });
-  toolResults.gf = gfResult;
-
-  const endpointsConParametros = endpoints.filter(endpoint => endpoint.hasParams);
-  const urlsParametrizadas = endpointsConParametros.map(endpoint => endpoint.url);
-  const gfBuckets = gfResult.parsed || {};
-  const xssDesdeGf = gfResult.status === 'success' ? (gfBuckets.xssCandidates || []) : [];
-  const sqliDesdeGf = gfResult.status === 'success' ? (gfBuckets.sqliCandidates || []) : [];
   const urlsDalfox = limitarUrls(
     xssDesdeGf.length ? xssDesdeGf : urlsParametrizadas,
     xssDesdeGf.length ? maxDalfoxUrls : Math.min(maxDalfoxUrls, 30)
@@ -604,9 +736,11 @@ async function ejecutarReconocimiento(targetOriginal) {
   console.log(`[dalfox] URLs recibidas desde gf xss: ${xssDesdeGf.length}`);
 
   const dalfoxOutput = urlsDalfox.length > 0
-    ? await ejecutarHerramienta(
+    ? await ejecutarHerramientaInput(
         'dalfox',
-        `printf "%s\n" "${inputDalfox}" | dalfox pipe --silence --format json`,
+        'dalfox',
+        ['pipe', '--silence', '--format', 'json'],
+        inputDalfox,
         parsearDalfox
       )
     : '';
@@ -641,8 +775,10 @@ async function ejecutarReconocimiento(targetOriginal) {
   for (const url of candidatosSqlmap) {
     try {
       registrarPaso('sqlmap', 'ejecutando sobre URL parametrizada', { entrada: url });
-      const sqlmapOutput = await ejecutarComando(
-        `python3 tools/sqlmap/sqlmap.py -u "${url}" --batch --random-agent --level=1 --risk=1 --smart --disable-coloring`
+      const sqlmapOutput = await ejecutarBinario(
+        'python3',
+        ['tools/sqlmap/sqlmap.py', '-u', url, '--batch', '--random-agent', '--level=1', '--risk=1', '--smart', '--disable-coloring'],
+        { timeout: timeoutMs }
       );
 
       sqlmap.push(parsearSqlmap(url, sqlmapOutput));
@@ -663,8 +799,10 @@ async function ejecutarReconocimiento(targetOriginal) {
     for (const url of activos.slice(0, 3)) {
       try {
         registrarPaso('sqlmap', 'sin parametros descubiertos; ejecutando crawl ligero', { entrada: url });
-        const sqlmapOutput = await ejecutarComando(
-          `python3 tools/sqlmap/sqlmap.py -u "${url}" --crawl=2 --batch --random-agent --level=1 --risk=1 --smart --disable-coloring`
+        const sqlmapOutput = await ejecutarBinario(
+          'python3',
+          ['tools/sqlmap/sqlmap.py', '-u', url, '--crawl=2', '--batch', '--random-agent', '--level=1', '--risk=1', '--smart', '--disable-coloring'],
+          { timeout: timeoutMs }
         );
         sqlmap.push(parsearSqlmap(url, sqlmapOutput));
       } catch (error) {

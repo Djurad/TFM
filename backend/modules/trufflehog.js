@@ -1,4 +1,4 @@
-const { exec } = require('child_process');
+const { execFile } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -6,9 +6,9 @@ const http = require('http');
 const https = require('https');
 const zlib = require('zlib');
 
-function ejecutar(comando, timeoutMs) {
+function ejecutar(args, timeoutMs) {
   return new Promise((resolve, reject) => {
-    exec(comando, {
+    execFile('trufflehog', args, {
       timeout: timeoutMs,
       maxBuffer: 1024 * 1024 * 20,
       env: {
@@ -115,11 +115,18 @@ function esJsEscaneable(url = '') {
     !lower.includes('/swagger-ui');
 }
 
+function esRecursoSensibleEscaneable(url = '') {
+  const lower = String(url).toLowerCase().split('?')[0];
+  return lower.includes('/.git') ||
+    lower.endsWith('/.env') ||
+    /\.(env|config|conf|ini|yml|yaml|txt|xml|sql|bak)$/i.test(lower);
+}
+
 function urlsParaSecretos(endpoints = []) {
   return Array.from(new Set(endpoints
     .map(endpoint => typeof endpoint === 'string' ? endpoint : endpoint.url)
     .filter(Boolean)
-    .filter(url => esJsEscaneable(url) || String(url).toLowerCase().includes('/.git'))));
+    .filter(url => esJsEscaneable(url) || esRecursoSensibleEscaneable(url))));
 }
 
 function nombreRecurso(url, index) {
@@ -172,8 +179,13 @@ function parsearResultados(raw = '', urlMap = new Map()) {
         source,
         file: fileSource,
         affected_url: source,
-        evidence: detectorName,
-        raw_reference: JSON.stringify(item).slice(0, 1600),
+        evidence: `${detectorName}${verified ? ' verificado' : ' no verificado'} en ${source || 'recurso descargado'}. El valor del secreto fue omitido.`,
+        raw_reference: JSON.stringify({
+          detectorName,
+          verified,
+          source,
+          file: fileSource
+        }),
         recommendation: 'Revocar el secreto si es real, rotarlo y eliminarlo del codigo o recurso publico.'
       };
     });
@@ -237,10 +249,10 @@ async function ejecutarTrufflehog(endpoints = [], opciones = {}) {
     let raw = '';
 
     try {
-      raw = await ejecutar(`trufflehog filesystem "${tmpDir}" --json --no-update`, timeoutMs);
+      raw = await ejecutar(['filesystem', tmpDir, '--json', '--no-update'], timeoutMs);
     } catch (error) {
       if (!esErrorNoUpdateNoSoportado(error)) throw error;
-      raw = await ejecutar(`trufflehog filesystem "${tmpDir}" --json`, timeoutMs);
+      raw = await ejecutar(['filesystem', tmpDir, '--json'], timeoutMs);
     }
 
     const parsed = parsearResultados(raw, urlMap);

@@ -359,11 +359,120 @@ function findingsSqlmap(toolResult, target) {
 function extraerFindingsDeterministas(tool, toolResult, target) {
   if (tool === 'katana') return findingsKatana(toolResult, target);
   if (tool === 'feroxbuster') return findingsFeroxbuster(toolResult, target);
+  if (tool === 'gau') return findingsGau(toolResult, target);
+  if (tool === 'gf') return findingsGf(toolResult, target);
   if (tool === 'nuclei') return findingsNuclei(toolResult, target);
   if (tool === 'dalfox') return findingsDalfox(toolResult, target);
   if (tool === 'sqlmap') return findingsSqlmap(toolResult, target);
   if (tool === 'trufflehog') return findingsTrufflehog(toolResult, target);
   return [];
+}
+
+function findingsGau(toolResult, target) {
+  const endpoints = Array.isArray(toolResult.parsed) ? toolResult.parsed : [];
+  const vistos = new Set();
+  const relevantes = [];
+
+  endpoints.forEach(endpoint => {
+    const url = typeof endpoint === 'string' ? endpoint : endpoint.url;
+    const key = normalizarUrlSuperficie(url);
+    if (!url || vistos.has(key)) return;
+    vistos.add(key);
+
+    const clasificacion = clasificarEndpointSensible(url);
+    if (clasificacion || endpoint.hasParams || endpoint.tieneParametros) {
+      relevantes.push({
+        endpoint,
+        url,
+        clasificacion
+      });
+    }
+  });
+
+  return normalizarFindings(
+    relevantes.slice(0, 40).map((item, index) => ({
+      id: `gau-historical-url-${index + 1}`,
+      tool: 'gau',
+      type: item.clasificacion ? 'surface' : 'historical-url',
+      title: item.clasificacion?.title || 'URL historica parametrizada',
+      description: item.clasificacion
+        ? `${item.clasificacion.title} encontrada en fuentes historicas.`
+        : 'GAU encontro una URL historica con parametros utiles para pruebas dirigidas.',
+      severity: 'info',
+      confidence: 'low',
+      isVulnerability: false,
+      affected_asset: target,
+      affected_url: item.url,
+      evidence: item.clasificacion?.evidence || `URL historica: ${item.url}`,
+      impact: '',
+      recommendation: item.clasificacion?.recommendation || 'Usar esta URL como entrada para pruebas manuales o herramientas especializadas; no tratarla como vulnerabilidad por si sola.',
+      false_positive_risk: 'medium',
+      raw_reference: JSON.stringify(item.endpoint).slice(0, 1200)
+    })),
+    'gau',
+    target
+  );
+}
+
+function tipoGfDesdeBucket(bucket = '') {
+  return bucket
+    .replace('Candidates', '')
+    .replace('sqli', 'sqli')
+    .replace('xss', 'xss');
+}
+
+function tituloGf(tipo) {
+  const mapa = {
+    xss: 'Candidato a XSS priorizado por GF',
+    sqli: 'Candidato a SQL Injection priorizado por GF',
+    ssrf: 'Candidato a SSRF priorizado por GF',
+    redirect: 'Candidato a Open Redirect priorizado por GF',
+    lfi: 'Candidato a LFI priorizado por GF',
+    rce: 'Candidato a RCE priorizado por GF'
+  };
+
+  return mapa[tipo] || 'Candidato priorizado por GF';
+}
+
+function severidadGf(tipo) {
+  if (['sqli', 'rce', 'ssrf'].includes(tipo)) return 'medium';
+  return 'low';
+}
+
+function findingsGf(toolResult, target) {
+  const buckets = toolResult.parsed || {};
+  const findings = [];
+  const vistos = new Set();
+
+  Object.entries(buckets).forEach(([bucket, urls]) => {
+    const tipo = tipoGfDesdeBucket(bucket);
+    (Array.isArray(urls) ? urls : []).forEach(url => {
+      const key = `${tipo}|${normalizarUrlSuperficie(url)}`;
+      if (!url || vistos.has(key)) return;
+      vistos.add(key);
+
+      findings.push({
+        id: `gf-${tipo}-${findings.length + 1}`,
+        tool: 'gf',
+        type: 'gf-candidate',
+        vulnerability_type: tipo,
+        title: tituloGf(tipo),
+        description: `GF marco esta URL como candidata para pruebas de ${tipo.toUpperCase()}. No confirma explotabilidad.`,
+        severity: severidadGf(tipo),
+        confidence: 'medium',
+        isVulnerability: true,
+        affected_asset: target,
+        affected_url: url,
+        evidence: `Patron GF: ${tipo}\nURL: ${url}`,
+        impact: 'Puede indicar un endpoint con parametros interesantes para validacion dirigida.',
+        recommendation: 'Validar manualmente y con herramientas especificas antes de reportarlo como vulnerabilidad confirmada.',
+        false_positive_risk: 'high',
+        raw_reference: `${tipo}: ${url}`
+      });
+    });
+  });
+
+  return normalizarFindings(findings.slice(0, 60), 'gf', target);
 }
 
 function esExposicionFerox(url = '') {
@@ -428,7 +537,7 @@ function findingsTrufflehog(toolResult, target) {
     items.map((item, index) => ({
       id: item.id || `trufflehog-secret-${index + 1}`,
       tool: 'trufflehog',
-      type: 'secret',
+      type: 'exposed-secret',
       title: item.verified ? 'Secreto verificado detectado' : 'Posible secreto detectado',
       description: item.description || `TruffleHog detecto ${item.detectorName || 'un secreto'}.`,
       severity: item.verified ? 'high' : 'medium',
@@ -436,7 +545,7 @@ function findingsTrufflehog(toolResult, target) {
       isVulnerability: true,
       affected_asset: target,
       affected_url: item.source || item.affected_url || null,
-      evidence: item.evidence || item.detectorName || 'TruffleHog detecto un posible secreto.',
+      evidence: item.evidence || `${item.detectorName || 'Secreto'} detectado. El valor completo fue omitido por seguridad.`,
       recommendation: item.recommendation || 'Revocar y rotar el secreto si es real, y eliminarlo del recurso publico.',
       verified: Boolean(item.verified),
       detectorName: item.detectorName || null,

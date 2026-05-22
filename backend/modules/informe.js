@@ -1,4 +1,10 @@
 const { resumenSeveridad } = require('./normalizacion');
+const HARDENING_TYPES = new Set([
+  'missing_security_header',
+  'insecure_cookie',
+  'missing_https_redirect',
+  'tls_certificate_issue'
+]);
 
 function agruparPorHerramienta(findings) {
   return findings.reduce((grupos, finding) => {
@@ -12,16 +18,22 @@ function agruparPorHerramienta(findings) {
 function esConfirmada(finding) {
   return finding.isVulnerability === true &&
     finding.confidence === 'high' &&
+    !HARDENING_TYPES.has(finding.type) &&
     finding.isFalsePositiveLikely !== true;
 }
 
 function esPosible(finding) {
   return finding.isVulnerability === true &&
     finding.confidence === 'medium' &&
+    !HARDENING_TYPES.has(finding.type) &&
     finding.isFalsePositiveLikely !== true;
 }
 
 function lineaFinding(finding) {
+  const relaciones = Array.isArray(finding.correlation_notes) && finding.correlation_notes.length
+    ? `\n- Relaciones: ${finding.correlation_notes.join(' | ')}`
+    : '';
+
   return [
     `### ${finding.title}`,
     '',
@@ -31,7 +43,7 @@ function lineaFinding(finding) {
     `- Confianza: ${finding.confidence}`,
     `- Evidencia: ${finding.evidence || 'Sin evidencia detallada.'}`,
     `- Impacto: ${finding.impact || 'Requiere validacion segun el contexto del activo.'}`,
-    `- Recomendacion: ${finding.recommendation || 'Aplicar la remediacion especifica tras validar el hallazgo.'}`
+    `- Recomendacion: ${finding.recommendation || 'Aplicar la remediacion especifica tras validar el hallazgo.'}${relaciones}`
   ].join('\n');
 }
 
@@ -48,11 +60,19 @@ function generarResumenEjecutivo(target, confirmadas, posibles, superficie, reco
   const summary = resumenSeveridad(reportables);
   const herramientas = Object.keys(contexto.toolResults || {}).join(', ') || 'herramientas automatizadas configuradas';
 
+  const score = contexto.risk_score === null || contexto.risk_score === undefined
+    ? 'N/D'
+    : `${contexto.risk_score}/100`;
+  const riskLevel = contexto.risk_level || 'N/D';
+  const riskGrade = contexto.risk_grade || 'N/D';
+
   return `# Informe de analisis de seguridad web
 
 ## Resumen ejecutivo
 
 Objetivo analizado: ${target}
+
+Riesgo final: ${score} [${String(riskLevel).toUpperCase()}] - grado ${riskGrade}.
 
 Se han identificado ${reportables.length} vulnerabilidades reportables: ${confirmadas.length} confirmadas y ${posibles.length} posibles.
 
@@ -63,6 +83,46 @@ Herramientas utilizadas: ${herramientas}.
 La cobertura se amplio con fuentes historicas y fuerza bruta controlada cuando estaban disponibles, manteniendo esos resultados separados de las vulnerabilidades.
 
 La superficie descubierta (${superficie.length}), el reconocimiento informativo (${reconocimiento.length}) y los falsos positivos o descartados (${descartados.length}) se incluyen solo como anexos y no forman parte del conteo principal de vulnerabilidades.
+`;
+}
+
+function generarSeccionScore(contexto = {}) {
+  const score = contexto.risk_score === null || contexto.risk_score === undefined
+    ? 'N/D'
+    : `${contexto.risk_score}/100`;
+  return `## Score final de riesgo
+
+Risk score: ${score}
+
+Nivel: ${contexto.risk_level || 'N/D'}
+
+Grado: ${contexto.risk_grade || 'N/D'}
+
+El score usa riesgo acumulado: 0 representa ausencia de riesgo significativo y 100 representa riesgo critico.
+`;
+}
+
+function generarTimeline(contexto = {}) {
+  const items = Array.isArray(contexto.pipelineTimeline) ? contexto.pipelineTimeline : [];
+  if (!items.length) return '## Pipeline de ejecucion\n\nNo hay timeline registrado.\n';
+
+  return `## Pipeline de ejecucion
+
+${items.map(item => `- [${String(item.status || '--').toUpperCase()}] ${item.tool}: ${item.detail || '--'} (${item.duration_ms ? `${item.duration_ms} ms` : '--'})`).join('\n')}
+`;
+}
+
+function generarCorrelaciones(contexto = {}) {
+  const correlations = Array.isArray(contexto.correlations) ? contexto.correlations : [];
+  if (!correlations.length) return '## Correlaciones detectadas\n\nNo se detectaron correlaciones automaticas destacables.\n';
+
+  return `## Correlaciones detectadas
+
+${correlations.map(correlation => [
+    `- [${String(correlation.severity || 'info').toUpperCase()}] ${correlation.title}`,
+    `  - Cadena: ${(correlation.chain || []).join(' -> ') || '--'}`,
+    `  - ${correlation.description || '-'}`
+  ].join('\n')).join('\n')}
 `;
 }
 
@@ -129,16 +189,25 @@ async function generarInformeDesdeFindings(target, findings, contexto = {}) {
     f.isFalsePositiveLikely ||
     (f.isVulnerability === true && f.confidence === 'low')
   );
+  const hardening = findings.filter(f => HARDENING_TYPES.has(f.type));
   const feroxFindings = findings.filter(f => f.tool === 'feroxbuster');
   const gauFindings = findings.filter(f => f.tool === 'gau');
   const gfFindings = findings.filter(f => f.tool === 'gf');
   const trufflehogFindings = findings.filter(f => f.tool === 'trufflehog');
+  const passiveFindings = findings.filter(f =>
+    ['headers', 'cookies', 'httpsredirect', 'tls', 'robotssitemap', 'ports'].includes(f.tool)
+  );
 
   const secciones = [
     generarResumenEjecutivo(target, confirmadas, posibles, superficie, reconocimiento, descartados, contexto),
+    generarSeccionScore(contexto),
+    generarTimeline(contexto),
+    generarCorrelaciones(contexto),
     generarSeccion('Vulnerabilidades confirmadas', confirmadas, 'No se identificaron vulnerabilidades confirmadas.'),
     generarSeccion('Posibles vulnerabilidades', posibles, 'No se identificaron posibles vulnerabilidades con evidencia suficiente.'),
+    generarSeccion('Hardening y configuracion defensiva', hardening, 'No se identificaron problemas de hardening destacables.'),
     generarRecomendacionesPrioritarias(confirmadas, posibles),
+    generarAnexoHerramienta('Anexo: analisis pasivo defensivo', passiveFindings, 'No hay hallazgos pasivos defensivos registrados.'),
     generarAnexoHerramienta('Anexo: Feroxbuster - rutas descubiertas y sensibles', feroxFindings, 'Feroxbuster no registro rutas destacables o no se ejecuto.'),
     generarAnexoHerramienta('Anexo: GAU - URLs historicas y parametrizadas', gauFindings, 'GAU no registro URLs historicas destacables o no se ejecuto.'),
     generarAnexoGf(contexto.gfCandidates || {}),

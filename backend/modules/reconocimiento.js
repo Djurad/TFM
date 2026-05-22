@@ -4,6 +4,12 @@ const { ejecutarGau } = require('./gau');
 const { ejecutarFeroxbuster } = require('./feroxbuster');
 const { ejecutarGf, deduplicarPorPatron, ordenarPorPrioridad, PRIORIDAD_PARAMS } = require('./gf');
 const { ejecutarTrufflehog } = require('./trufflehog');
+const { ejecutarHeaders } = require('./headers');
+const { ejecutarCookies } = require('./cookies');
+const { ejecutarHttpsRedirect } = require('./httpsRedirect');
+const { ejecutarRobotsSitemap } = require('./robotsSitemap');
+const { ejecutarTls } = require('./tls');
+const { ejecutarPorts } = require('./ports');
 
 function ejecutarComando(comando, opciones = {}) {
   return new Promise((resolve, reject) => {
@@ -430,7 +436,11 @@ function contarDescartadosNuclei(lineas = []) {
   }).length;
 }
 
-async function ejecutarReconocimiento(targetOriginal) {
+async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
+  const onProgress = typeof opciones.onProgress === 'function' ? opciones.onProgress : null;
+  const progreso = (tool, status, message, extra = {}) => {
+    if (onProgress) onProgress({ tool, status, message, ...extra });
+  };
   const entrada = normalizarEntrada(targetOriginal);
   let target = entrada.domain;
 
@@ -457,9 +467,11 @@ async function ejecutarReconocimiento(targetOriginal) {
   const maxDalfoxUrls = Number(process.env.MAX_DALFOX_URLS || 50);
   const maxSqlmapUrls = Number(process.env.MAX_SQLMAP_URLS || 10);
   const maxJsSecretScan = Number(process.env.MAX_JS_SECRET_SCAN || 20);
+  const passiveTimeoutMs = Number(process.env.PASSIVE_TIMEOUT_SECONDS || 8) * 1000;
 
   async function ejecutarHerramienta(nombre, comando, parser = parsearLineas) {
     try {
+      progreso(nombre, 'running', `Ejecutando ${nombre}`);
       registrarPaso(nombre, 'ejecutando herramienta', { entrada: target, comando });
       const raw = await ejecutarComando(comando, {
         permitirFalloSinSalida: nombre === 'nuclei'
@@ -474,6 +486,7 @@ async function ejecutarReconocimiento(targetOriginal) {
         parsed,
         findings: []
       };
+      progreso(nombre, 'done', `${nombre} finalizado`, { count: parsedCount });
 
       return raw;
     } catch (error) {
@@ -484,6 +497,7 @@ async function ejecutarReconocimiento(targetOriginal) {
         findings: [],
         error: error.message
       };
+      progreso(nombre, 'error', error.message);
 
       console.error(`Error en ${nombre}:`, error.message);
       return '';
@@ -492,6 +506,7 @@ async function ejecutarReconocimiento(targetOriginal) {
 
   async function ejecutarHerramientaInput(nombre, binario, args, input, parser = parsearLineas, opciones = {}) {
     try {
+      progreso(nombre, 'running', `Ejecutando ${nombre}`);
       registrarPaso(nombre, 'ejecutando herramienta', { entrada: target, binario, args });
       const raw = await ejecutarConInput(binario, args, input, {
         timeout: timeoutMs,
@@ -507,6 +522,7 @@ async function ejecutarReconocimiento(targetOriginal) {
         parsed,
         findings: []
       };
+      progreso(nombre, 'done', `${nombre} finalizado`, { count: parsedCount });
 
       return raw;
     } catch (error) {
@@ -517,6 +533,7 @@ async function ejecutarReconocimiento(targetOriginal) {
         findings: [],
         error: error.message
       };
+      progreso(nombre, 'error', error.message);
 
       console.error(`Error en ${nombre}:`, error.message);
       return '';
@@ -528,6 +545,7 @@ async function ejecutarReconocimiento(targetOriginal) {
     dominioLimpio: target,
     urlInicial: entrada.inputUrl
   });
+  progreso('normalizacion', 'running', 'Normalizando objetivo');
 
   const targetLocal = esTargetLocal(target) || esIpV4(target);
 
@@ -535,6 +553,7 @@ async function ejecutarReconocimiento(targetOriginal) {
     ? ''
     : await (async () => {
         try {
+          progreso('subfinder', 'running', 'Buscando subdominios');
           registrarPaso('subfinder', 'ejecutando herramienta', { entrada: target, binario: 'subfinder' });
           const raw = await ejecutarBinario('subfinder', ['-d', target, '-silent'], { timeout: timeoutMs });
           toolResults.subfinder = {
@@ -543,6 +562,7 @@ async function ejecutarReconocimiento(targetOriginal) {
             parsed: parsearLineas(raw),
             findings: []
           };
+          progreso('subfinder', 'done', 'Subfinder finalizado', { count: toolResults.subfinder.parsed.length });
           return raw;
         } catch (error) {
           toolResults.subfinder = {
@@ -552,6 +572,7 @@ async function ejecutarReconocimiento(targetOriginal) {
             findings: [],
             error: error.message
           };
+          progreso('subfinder', 'error', error.message);
           console.error('Error en subfinder:', error.message);
           return '';
         }
@@ -565,6 +586,7 @@ async function ejecutarReconocimiento(targetOriginal) {
       findings: [],
       error: 'subfinder no aplica a targets locales o direcciones IP'
     };
+    progreso('subfinder', 'skipped', 'Subfinder no aplica a targets locales o IP');
   }
 
   let subdominios = parsearLineas(subfinderOutput);
@@ -585,6 +607,26 @@ async function ejecutarReconocimiento(targetOriginal) {
   const activos = deduplicarUrls(httpx.map(item => item.finalUrl || item.url).filter(Boolean));
   const inputKatana = activos.join('\n');
 
+  progreso('headers', 'running', 'Analizando cabeceras HTTP');
+  toolResults.headers = await ejecutarHeaders(activos, { timeoutMs: passiveTimeoutMs });
+  progreso('headers', toolResults.headers.status || 'done', 'Cabeceras HTTP finalizadas');
+  progreso('cookies', 'running', 'Analizando cookies');
+  toolResults.cookies = await ejecutarCookies(activos, { timeoutMs: passiveTimeoutMs });
+  progreso('cookies', toolResults.cookies.status || 'done', 'Cookies finalizadas');
+  progreso('httpsRedirect', 'running', 'Comprobando redireccion HTTPS');
+  toolResults.httpsRedirect = await ejecutarHttpsRedirect(target, { timeoutMs: passiveTimeoutMs });
+  progreso('httpsRedirect', toolResults.httpsRedirect.status || 'done', 'Redireccion HTTPS finalizada');
+  progreso('tls', 'running', 'Revisando TLS y certificados');
+  toolResults.tls = await ejecutarTls(activos, { timeoutMs: passiveTimeoutMs });
+  progreso('tls', toolResults.tls.status || 'done', 'TLS finalizado');
+  progreso('robotsSitemap', 'running', 'Leyendo robots.txt y sitemap.xml');
+  toolResults.robotsSitemap = await ejecutarRobotsSitemap(activos, { timeoutMs: passiveTimeoutMs });
+  progreso('robotsSitemap', toolResults.robotsSitemap.status || 'done', 'Robots y sitemap finalizados');
+  progreso('ports', 'running', 'Comprobando puertos expuestos');
+  toolResults.ports = await ejecutarPorts(target, { timeoutMs: passiveTimeoutMs });
+  progreso('ports', toolResults.ports.status || 'done', 'Puertos finalizados');
+
+  progreso('feroxbuster', 'running', 'Descubriendo rutas');
   const feroxResult = activos.length > 0
     ? await ejecutarFeroxbuster(activos, { maxUrls: maxFeroxUrls, timeoutMs })
     : {
@@ -596,6 +638,7 @@ async function ejecutarReconocimiento(targetOriginal) {
         metrics: { endpoints_encontrados: 0, rutas_interesantes: 0, posibles_vulnerabilidades: 0 }
       };
   toolResults.feroxbuster = feroxResult;
+  progreso('feroxbuster', feroxResult.status || 'done', 'Feroxbuster finalizado');
 
   const katanaOutput = activos.length > 0
     ? await ejecutarHerramientaInput(
@@ -626,6 +669,7 @@ async function ejecutarReconocimiento(targetOriginal) {
   const assetsIgnorados = endpointUrlsCrudos.length - endpointUrls.length;
   const duplicadosKatana = Math.max(0, endpointUrlsCrudosSinDedup.filter(Boolean).length - endpointUrlsCrudos.length);
 
+  progreso('gau', 'running', 'Recuperando URLs historicas');
   const gauResult = targetLocal
     ? {
         status: 'skipped',
@@ -642,6 +686,7 @@ async function ejecutarReconocimiento(targetOriginal) {
       }
     : await ejecutarGau(target, { maxUrls: maxGauUrls, timeoutMs });
   toolResults.gau = gauResult;
+  progreso('gau', gauResult.status || 'done', 'GAU finalizado');
 
   const endpointsKatana = endpointUrls.map(url => crearEndpoint(url, 'katana', buscarHttpInfo(url, httpx)));
   const endpointsGau = Array.isArray(gauResult.parsed) ? gauResult.parsed : [];
@@ -686,8 +731,10 @@ async function ejecutarReconocimiento(targetOriginal) {
     };
   }
 
+  progreso('gf', 'running', 'Priorizando candidatos con GF');
   const gfResult = await ejecutarGf(endpoints, { timeoutMs });
   toolResults.gf = gfResult;
+  progreso('gf', gfResult.status || 'done', 'GF finalizado');
 
   const endpointsConParametros = endpoints.filter(endpoint => endpoint.hasParams);
   const urlsParametrizadas = endpointsConParametros.map(endpoint => endpoint.url);
@@ -754,6 +801,7 @@ async function ejecutarReconocimiento(targetOriginal) {
       error: 'No hay endpoints con parametros para probar XSS.'
     };
   }
+  progreso('dalfox', toolResults.dalfox?.status || 'done', 'Dalfox finalizado');
 
   const dalfox = parsearDalfox(dalfoxOutput);
 
@@ -774,6 +822,7 @@ async function ejecutarReconocimiento(targetOriginal) {
 
   for (const url of candidatosSqlmap) {
     try {
+      progreso('sqlmap', 'running', `Probando SQLi en ${url}`);
       registrarPaso('sqlmap', 'ejecutando sobre URL parametrizada', { entrada: url });
       const sqlmapOutput = await ejecutarBinario(
         'python3',
@@ -835,7 +884,9 @@ async function ejecutarReconocimiento(targetOriginal) {
       ? 'sqlmap no se ejecuto porque no se encontraron parametros'
       : null
   };
+  progreso('sqlmap', toolResults.sqlmap.status || 'done', 'Sqlmap finalizado');
 
+  progreso('trufflehog', 'running', 'Buscando secretos expuestos');
   const trufflehogResult = await ejecutarTrufflehog(
     [
       ...endpointUrlsCrudos,
@@ -844,6 +895,7 @@ async function ejecutarReconocimiento(targetOriginal) {
     { maxJs: maxJsSecretScan, timeoutMs }
   );
   toolResults.trufflehog = trufflehogResult;
+  progreso('trufflehog', trufflehogResult.status || 'done', 'Trufflehog finalizado');
 
   return {
     target,
@@ -857,6 +909,12 @@ async function ejecutarReconocimiento(targetOriginal) {
       httpx,
       dalfox,
       sqlmap,
+      headers: toolResults.headers?.parsed || [],
+      cookies: toolResults.cookies?.parsed || [],
+      httpsRedirect: toolResults.httpsRedirect?.parsed || [],
+      tls: toolResults.tls?.parsed || [],
+      robotsSitemap: toolResults.robotsSitemap?.parsed || [],
+      ports: toolResults.ports?.parsed || [],
       gf: gfResult.parsed || {},
       gau: endpointsGau,
       feroxbuster: endpointsFerox,

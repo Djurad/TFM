@@ -149,7 +149,12 @@ function recomendacionPorTipo(type, tool) {
     return 'Validar el parametro afectado y corregir la consulta usando consultas parametrizadas o un ORM seguro.';
   }
 
-  if (type === 'hardening') {
+  if (type === 'hardening' || [
+    'missing_security_header',
+    'insecure_cookie',
+    'missing_https_redirect',
+    'tls_certificate_issue'
+  ].includes(type)) {
     return 'Revisar la cabecera o configuracion indicada y aplicar hardening segun el contexto de la aplicacion.';
   }
 
@@ -170,9 +175,9 @@ function clasificarFinding(raw = {}) {
   let type = raw.type || raw.tipo || 'vulnerability';
   let severity = severityOriginal;
   let confidence = normalizarConfianza(raw.confidence || raw.confianza, severity === 'info' ? 'low' : 'medium');
-  let isVulnerability = severity !== 'info';
-  let isFalsePositiveLikely = false;
-  let falsePositiveReason = '';
+  let isVulnerability = typeof raw.isVulnerability === 'boolean' ? raw.isVulnerability : severity !== 'info';
+  let isFalsePositiveLikely = Boolean(raw.isFalsePositiveLikely);
+  let falsePositiveReason = raw.falsePositiveReason || '';
 
   if (tool === 'subfinder' || tool === 'httpx') {
     type = 'reconocimiento';
@@ -195,8 +200,37 @@ function clasificarFinding(raw = {}) {
   if (tool === 'gf') {
     type = 'gf-candidate';
     severity = ['medium', 'low'].includes(severityOriginal) ? severityOriginal : 'low';
-    confidence = normalizarConfianza(raw.confidence || raw.confianza, 'medium');
-    isVulnerability = true;
+    confidence = 'low';
+    isVulnerability = false;
+    isFalsePositiveLikely = false;
+    falsePositiveReason = 'GF prioriza candidatos por patron; no confirma explotabilidad.';
+  }
+
+  if (['headers', 'cookies', 'httpsredirect', 'tls'].includes(tool)) {
+    type = raw.type || type;
+    severity = severityOriginal;
+    confidence = normalizarConfianza(raw.confidence || raw.confianza, severity === 'info' ? 'low' : 'medium');
+    isVulnerability = typeof raw.isVulnerability === 'boolean' ? raw.isVulnerability : severity !== 'info';
+    isFalsePositiveLikely = raw.false_positive_risk === 'high' && confidence === 'low';
+    falsePositiveReason = isFalsePositiveLikely
+      ? 'Hallazgo de hardening de baja confianza o bajo impacto; requiere validacion contextual.'
+      : '';
+  }
+
+  if (tool === 'robotssitemap') {
+    type = raw.type || 'reconocimiento';
+    severity = severityOriginal;
+    confidence = normalizarConfianza(raw.confidence || raw.confianza, 'low');
+    isVulnerability = false;
+    isFalsePositiveLikely = false;
+    falsePositiveReason = '';
+  }
+
+  if (tool === 'ports') {
+    type = raw.type || type;
+    severity = severityOriginal;
+    confidence = normalizarConfianza(raw.confidence || raw.confianza, severity === 'info' ? 'low' : 'medium');
+    isVulnerability = typeof raw.isVulnerability === 'boolean' ? raw.isVulnerability : ['high', 'critical'].includes(severity);
     isFalsePositiveLikely = false;
     falsePositiveReason = '';
   }
@@ -240,7 +274,7 @@ function clasificarFinding(raw = {}) {
   }
 
   if (severity === 'info') {
-    type = type === 'discarded' || type === 'surface' ? type : 'reconocimiento';
+    type = ['discarded', 'surface', 'exposed_server_banner', 'exposed_port'].includes(type) ? type : 'reconocimiento';
     isVulnerability = false;
     confidence = 'low';
     isFalsePositiveLikely = type === 'discarded';
@@ -266,7 +300,8 @@ function clasificarFinding(raw = {}) {
   }
 
   if (tool === 'sqlmap') {
-    if (raw.status === 'confirmed_sqli' || raw.vulnerable === true) {
+    const evidenciaConcluyente = Boolean(raw.payload || raw.dbms || raw.parametro || raw.parameter);
+    if ((raw.status === 'confirmed_sqli' || raw.vulnerable === true) && evidenciaConcluyente) {
       type = 'vulnerability';
       severity = 'critical';
       confidence = 'high';
@@ -275,11 +310,20 @@ function clasificarFinding(raw = {}) {
       falsePositiveReason = '';
     } else if (raw.status === 'possible_sqli') {
       type = 'vulnerability';
-      severity = 'high';
+      severity = evidenciaConcluyente ? 'medium' : 'low';
+      confidence = evidenciaConcluyente ? 'medium' : 'low';
+      isVulnerability = true;
+      isFalsePositiveLikely = !evidenciaConcluyente;
+      falsePositiveReason = evidenciaConcluyente
+        ? ''
+        : 'Sospecha no concluyente: sqlmap no obtuvo payload, parametro o DBMS suficiente para confirmarlo.';
+    } else if (raw.status === 'confirmed_sqli' || raw.vulnerable === true) {
+      type = 'vulnerability';
+      severity = 'medium';
       confidence = 'medium';
       isVulnerability = true;
-      isFalsePositiveLikely = false;
-      falsePositiveReason = '';
+      isFalsePositiveLikely = true;
+      falsePositiveReason = 'Sqlmap marco el resultado como vulnerable, pero falta evidencia tecnica concluyente.';
     } else {
       type = raw.status === 'error' ? 'error' : 'reconocimiento';
       severity = 'info';

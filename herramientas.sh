@@ -7,7 +7,7 @@ echo "[+] Setup"
 # Dependencias base
 
 sudo apt update
-sudo apt install -y nodejs npm git curl cargo
+sudo apt install -y nodejs npm git curl cargo nmap
 
 # Instalar dependencias npm del proyecto
 
@@ -144,3 +144,4 @@ echo "gf -list"
 echo "gau --version"
 echo "feroxbuster --help"
 echo "trufflehog --help"
+echo "nmap --version"

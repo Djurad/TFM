@@ -11,7 +11,7 @@ sudo apt update
 sudo apt upgrade -y
 
 echo "[+] Instalando paquetes base..."
-sudo apt install -y git curl wget unzip build-essential jq
+sudo apt install -y git curl wget unzip build-essential jq nmap
 sudo apt install -y cargo || true
 
 echo "[+] Instalando Node.js 20..."
@@ -89,6 +89,7 @@ gau --version || true
 gf -h >/dev/null 2>&1 || true
 feroxbuster --version || true
 trufflehog --version || true
+nmap --version || true
 
 echo "[+] Actualizando templates de nuclei..."
 nuclei -update-templates || true

@@ -8,10 +8,18 @@ const { enriquecerFindingsIA } = require('./modules/ia');
 const { normalizarFindings, resumenSeveridad } = require('./modules/normalizacion');
 const { generarInformeDesdeFindings } = require('./modules/informe');
 const { extraerFindingsDeterministas } = require('./modules/extractores');
-const { clasificarFindings, debeEnviarIA } = require('./modules/clasificadorFindings');
+const { clasificarFindings } = require('./modules/clasificadorFindings');
+const { calcularRiskScore } = require('./modules/scoring');
+const { correlacionarFindings, normalizarUrl, origenYRuta, parametro } = require('./modules/correlacion');
 
 const app = express();
 const PORT = 3000;
+const HARDENING_TYPES = new Set([
+  'missing_security_header',
+  'insecure_cookie',
+  'missing_https_redirect',
+  'tls_certificate_issue'
+]);
 
 app.use(cors());
 
@@ -41,11 +49,12 @@ function serializarToolResult(result) {
 
 function agruparFindings(findings = []) {
   return {
-    confirmadas: findings.filter(f => f.isVulnerability && f.confidence === 'high' && !f.isFalsePositiveLikely),
-    posibles: findings.filter(f => f.isVulnerability && f.confidence === 'medium' && !f.isFalsePositiveLikely),
-    baja_confianza: findings.filter(f => f.isVulnerability && (f.confidence === 'low' || f.isFalsePositiveLikely)),
+    confirmadas: findings.filter(f => f.isVulnerability && f.confidence === 'high' && !f.isFalsePositiveLikely && !HARDENING_TYPES.has(f.type)),
+    posibles: findings.filter(f => f.isVulnerability && f.confidence === 'medium' && !f.isFalsePositiveLikely && !HARDENING_TYPES.has(f.type)),
+    hardening: findings.filter(f => HARDENING_TYPES.has(f.type)),
+    baja_confianza: findings.filter(f => f.isVulnerability && (f.confidence === 'low' || f.isFalsePositiveLikely) && !HARDENING_TYPES.has(f.type)),
     superficie: findings.filter(f => f.type === 'surface'),
-    reconocimiento: findings.filter(f => (!f.isVulnerability || f.type === 'reconocimiento') && f.type !== 'surface' && f.type !== 'discarded'),
+    reconocimiento: findings.filter(f => (!f.isVulnerability || f.type === 'reconocimiento') && f.type !== 'surface' && f.type !== 'discarded' && !HARDENING_TYPES.has(f.type)),
     descartados: findings.filter(f => f.type === 'discarded')
   };
 }
@@ -65,6 +74,7 @@ function construirCandidatosGf(toolResults = {}) {
 function construirResumenUI(grupos) {
   const confirmadas = grupos.confirmadas?.length || 0;
   const posibles = grupos.posibles?.length || 0;
+  const hardening = grupos.hardening?.length || 0;
   const superficie = grupos.superficie?.length || 0;
   const reconocimiento = grupos.reconocimiento?.length || 0;
   const descartados = (grupos.descartados?.length || 0) + (grupos.baja_confianza?.length || 0);
@@ -73,6 +83,7 @@ function construirResumenUI(grupos) {
     confirmadas,
     posibles,
     total_vulnerabilidades: confirmadas + posibles,
+    hardening,
     superficie,
     reconocimiento,
     descartados
@@ -80,24 +91,129 @@ function construirResumenUI(grupos) {
 }
 
 function claveFinding(finding = {}) {
+  const normalizedUrl = normalizarUrl(finding.affected_url || finding.affected_asset || '');
+  const param = parametro(finding);
+
+  if (finding.tool === 'ports' && finding.port) {
+    return `ports|${finding.affected_asset || ''}|${finding.port}|tcp`.toLowerCase();
+  }
+
+  if (finding.tool === 'katana' && /swagger|openapi/i.test(`${finding.title} ${finding.affected_url}`)) {
+    return `surface|swagger|${normalizedUrl}`.toLowerCase();
+  }
+
   return [
-    finding.tool || '',
     finding.type || '',
     finding.vulnerability_type || '',
-    finding.title || '',
-    finding.affected_url || finding.affected_asset || ''
+    normalizedUrl,
+    param,
+    finding.type || '',
+    finding.tool || ''
   ].join('|').toLowerCase();
 }
 
 function deduplicarFindings(findings = []) {
   const mapa = new Map();
+  const confirmadosXss = new Set(
+    findings
+      .filter(f => f.tool === 'dalfox' && (f.confidence === 'high' || f.confidence === 'confirmed'))
+      .map(f => `${origenYRuta(f.affected_url || '')}|${parametro(f)}`)
+  );
 
   findings.forEach(finding => {
+    if (finding.tool === 'gf' && finding.vulnerability_type === 'xss') {
+      const keyXss = `${origenYRuta(finding.affected_url || '')}|${parametro(finding)}`;
+      if (confirmadosXss.has(keyXss)) return;
+    }
+
     const key = claveFinding(finding);
     if (!mapa.has(key)) mapa.set(key, finding);
   });
 
   return Array.from(mapa.values());
+}
+
+function etiquetaRiesgo(risk = {}) {
+  if (risk.risk_score === null || risk.risk_score === undefined) return 'N/D';
+  return `${risk.risk_score}/100 riesgo ${risk.risk_level}`;
+}
+
+function construirPipelineTimeline(toolResults = {}, counters = {}, correlations = [], risk = {}) {
+  const orden = [
+    'subfinder',
+    'httpx',
+    'headers',
+    'cookies',
+    'httpsRedirect',
+    'tls',
+    'robotsSitemap',
+    'ports',
+    'feroxbuster',
+    'katana',
+    'gau',
+    'gf',
+    'nuclei',
+    'dalfox',
+    'sqlmap',
+    'trufflehog'
+  ];
+
+  const detalle = (tool, result = {}) => {
+    const counter = counters[tool] || {};
+    if (tool === 'subfinder') return `${counter.subdominios_encontrados || result.parsed_count || 0} subdominios`;
+    if (tool === 'httpx') return `${counter.activos_vivos || result.parsed_count || 0} vivos`;
+    if (tool === 'headers') return `${counter.cabeceras_ausentes || 0} ausentes / ${counter.banners_expuestos || 0} banners`;
+    if (tool === 'cookies') return `${counter.cookies_inseguras || 0} inseguras / ${counter.cookies_sesion || 0} sesion`;
+    if (tool === 'httpsRedirect') return `${counter.redirecciona_https || 0} HTTPS ok / ${counter.http_sin_redirect || 0} HTTP abierto`;
+    if (tool === 'tls') return `${counter.certificados_analizados || 0} certs / ${counter.expirados || 0} expirados`;
+    if (tool === 'robotsSitemap') return `${counter.recursos_encontrados || 0} recursos / ${counter.rutas_sensibles || 0} sensibles`;
+    if (tool === 'ports') return `${counter.puertos_abiertos || 0} abiertos${counter.source ? ` / ${counter.source}` : ''}`;
+    if (tool === 'feroxbuster') return `${counter.rutas_descubiertas || 0} rutas / ${counter.rutas_sensibles || 0} sensibles`;
+    if (tool === 'katana') return `${counter.endpoints_encontrados || result.parsed_count || 0} endpoints / ${counter.superficie_util || 0} superficie`;
+    if (tool === 'gau') return `${counter.endpoints_encontrados || result.parsed_count || 0} historicas / ${counter.con_parametros || 0} params`;
+    if (tool === 'gf') return `${counter.xss || 0} XSS / ${counter.sqli || 0} SQLi / ${counter.ssrf || 0} SSRF`;
+    if (tool === 'nuclei') return `${counter.vulnerabilidades_reales || 0} vulnerabilidades`;
+    if (tool === 'dalfox') return `${(result.findings || []).length} hallazgos`;
+    if (tool === 'sqlmap') return counter.no_ejecutada ? 'no ejecutada' : `${counter.confirmadas || 0} confirmadas / ${counter.posibles || 0} posibles`;
+    if (tool === 'trufflehog') return `${counter.secretos_confirmados || 0} confirmados / ${counter.secretos_posibles || 0} posibles`;
+    return `${(result.findings || []).length} hallazgos`;
+  };
+
+  return [
+    ...orden.map(tool => {
+      const result = toolResults[tool] || {};
+      const status = result.status || 'skipped';
+      const important = (result.findings || []).some(f => f.isVulnerability && !f.isFalsePositiveLikely && f.tool !== 'gf');
+      return {
+        tool,
+        status,
+        detail: detalle(tool, result),
+        duration_ms: result.metrics?.duration_ms || null,
+        important
+      };
+    }),
+    {
+      tool: 'correlacion',
+      status: 'success',
+      detail: `${correlations.length} relaciones detectadas`,
+      duration_ms: null,
+      important: correlations.length > 0
+    },
+    {
+      tool: 'score final',
+      status: risk.risk_score === null ? 'skipped' : 'success',
+      detail: etiquetaRiesgo(risk),
+      duration_ms: null,
+      important: risk.risk_score >= 41
+    },
+    {
+      tool: 'informe',
+      status: 'ready',
+      detail: 'PDF disponible',
+      duration_ms: null,
+      important: false
+    }
+  ];
 }
 
 function resumenHerramientas(reconocimiento, toolResults, findings) {
@@ -109,6 +225,35 @@ function resumenHerramientas(reconocimiento, toolResults, findings) {
     },
     httpx: {
       activos_vivos: reconocimiento.activos?.length || 0
+    },
+    headers: {
+      activos_analizados: toolResults.headers?.metrics?.activos_analizados || 0,
+      cabeceras_ausentes: toolResults.headers?.metrics?.cabeceras_ausentes || 0,
+      banners_expuestos: toolResults.headers?.metrics?.banners_expuestos || 0
+    },
+    cookies: {
+      cookies_analizadas: toolResults.cookies?.metrics?.cookies_analizadas || 0,
+      cookies_sesion: toolResults.cookies?.metrics?.cookies_sesion || 0,
+      cookies_inseguras: toolResults.cookies?.metrics?.cookies_inseguras || 0
+    },
+    httpsRedirect: {
+      redirecciona_https: toolResults.httpsRedirect?.metrics?.redirecciona_https || 0,
+      http_sin_redirect: toolResults.httpsRedirect?.metrics?.http_sin_redirect || 0
+    },
+    tls: {
+      certificados_analizados: toolResults.tls?.metrics?.certificados_analizados || 0,
+      expirados: toolResults.tls?.metrics?.expirados || 0,
+      proximos_expirar: toolResults.tls?.metrics?.proximos_expirar || 0,
+      errores_tls: toolResults.tls?.metrics?.errores_tls || 0
+    },
+    robotsSitemap: {
+      recursos_encontrados: toolResults.robotsSitemap?.metrics?.recursos_encontrados || 0,
+      rutas_sensibles: toolResults.robotsSitemap?.metrics?.rutas_sensibles || 0
+    },
+    ports: {
+      puertos_abiertos: toolResults.ports?.metrics?.puertos_abiertos || 0,
+      puertos_datos: toolResults.ports?.metrics?.puertos_datos || 0,
+      source: toolResults.ports?.metrics?.source || ''
     },
     katana: {
       endpoints_encontrados: toolResults.katana?.metrics?.endpoints_normalizados || reconocimiento.endpoints?.length || 0,
@@ -163,6 +308,10 @@ function aplicarFallbackIa(findings = []) {
   }));
 }
 
+function debeAnalizarHallazgoIA(finding = {}) {
+  return finding.type !== 'discarded';
+}
+
 app.post('/analizar', async (req, res) => {
   try {
     const entrada = req.body.prompt || req.body.target;
@@ -188,7 +337,7 @@ app.post('/analizar', async (req, res) => {
         extraerFindingsDeterministas(tool, result, reconocimiento.target)
       );
       const descartadosInfo = findingsDeterministas.filter(f => !f.isVulnerability || f.type === 'reconocimiento').length;
-      const findingsParaIA = findingsDeterministas.filter(debeEnviarIA);
+      const findingsParaIA = findingsDeterministas.filter(debeAnalizarHallazgoIA);
 
       result.findings = findingsDeterministas;
       result.metrics = {
@@ -240,7 +389,9 @@ app.post('/analizar', async (req, res) => {
       findings.push(...(result.findings || []));
     }
 
-    const findingsDeduplicados = deduplicarFindings(findings);
+    const findingsDeduplicadosBase = deduplicarFindings(findings);
+    const correlacion = correlacionarFindings(findingsDeduplicadosBase, toolResults);
+    const findingsDeduplicados = correlacion.findings;
     const grupos = agruparFindings(findingsDeduplicados);
     const findingsInforme = [
       ...grupos.confirmadas,
@@ -252,6 +403,20 @@ app.post('/analizar', async (req, res) => {
     console.log(`[UI] superficie mostrada: ${summaryUi.superficie}`);
     console.log(`[UI] superficie ocultada por ruido: ${Math.max(0, (toolResults.katana?.parsed?.length || 0) - summaryUi.superficie)}`);
 
+    const toolCounters = resumenHerramientas(reconocimiento, toolResults, findingsDeduplicados);
+    const risk = calcularRiskScore(findingsDeduplicados);
+    const serializedToolResults = Object.fromEntries(
+      Object.entries(toolResults).map(([tool, result]) => [
+        tool,
+        serializarToolResult(result)
+      ])
+    );
+    const pipelineTimeline = construirPipelineTimeline(serializedToolResults, toolCounters, correlacion.correlations, risk);
+
+    enviar({ type: 'progress', tool: 'correlacion', status: 'success', message: `${correlacion.correlations.length} relaciones detectadas` });
+    enviar({ type: 'progress', tool: 'score final', status: risk.risk_score === null ? 'skipped' : 'success', message: etiquetaRiesgo(risk) });
+    enviar({ type: 'progress', tool: 'informe', status: 'ready', message: 'PDF disponible tras finalizar' });
+
     const respuesta = {
       target: reconocimiento.target,
       status: 'completed',
@@ -259,13 +424,13 @@ app.post('/analizar', async (req, res) => {
       findings_reportables: findingsInforme,
       groups: grupos,
       gf_candidates: construirCandidatosGf(toolResults),
-      tool_results: Object.fromEntries(
-        Object.entries(toolResults).map(([tool, result]) => [
-          tool,
-          serializarToolResult(result)
-        ])
-      ),
-      tool_counters: resumenHerramientas(reconocimiento, toolResults, findingsDeduplicados),
+      tool_results: serializedToolResults,
+      tool_counters: toolCounters,
+      correlations: correlacion.correlations,
+      pipeline_timeline: pipelineTimeline,
+      risk_score: risk.risk_score,
+      risk_level: risk.risk_level,
+      risk_grade: risk.risk_grade,
       sqlmap_notice: toolResults.sqlmap?.status === 'skipped' ? toolResults.sqlmap.error : null,
       ai_notice: findings.some(f => f.ai_status === 'failed')
         ? 'La IA no respondió, se muestra análisis técnico básico.'
@@ -284,6 +449,148 @@ app.post('/analizar', async (req, res) => {
   }
 });
 
+app.post('/analizar-stream', async (req, res) => {
+  const enviar = payload => {
+    res.write(`${JSON.stringify(payload)}\n`);
+  };
+
+  res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('X-Accel-Buffering', 'no');
+
+  try {
+    const entrada = req.body.prompt || req.body.target;
+
+    if (!entrada || typeof entrada !== 'string' || !entrada.trim()) {
+      enviar({ type: 'error', error: 'No se recibio ningun dominio o URL.' });
+      return;
+    }
+
+    const reconocimiento = await ejecutarReconocimiento(entrada.trim(), {
+      onProgress: progress => enviar({
+        type: 'progress',
+        ...progress,
+        at: new Date().toISOString()
+      })
+    });
+    const toolResults = reconocimiento.tool_results || {};
+    const findings = [];
+
+    if (Object.keys(toolResults).length === 0) {
+      enviar({ type: 'error', error: 'El modulo de reconocimiento no devolvio resultados por herramienta.' });
+      return;
+    }
+
+    for (const [tool, result] of Object.entries(toolResults)) {
+      enviar({ type: 'progress', tool, status: 'running', message: `Clasificando hallazgos de ${tool}` });
+      const findingsDeterministas = clasificarFindings(
+        extraerFindingsDeterministas(tool, result, reconocimiento.target)
+      );
+      const descartadosInfo = findingsDeterministas.filter(f => !f.isVulnerability || f.type === 'reconocimiento').length;
+      const findingsParaIA = findingsDeterministas.filter(debeAnalizarHallazgoIA);
+
+      result.findings = findingsDeterministas;
+      result.metrics = {
+        ...(result.metrics || {}),
+        producidos: result.metrics?.producidos ?? (Array.isArray(result.parsed) ? result.parsed.length : 0),
+        descartados_info_fingerprinting: descartadosInfo,
+        descartados_assets: result.metrics?.descartados_assets ?? findingsDeterministas.filter(f => f.type === 'discarded').length,
+        enviados_ia: result.metrics?.enviados_ia ?? findingsParaIA.length,
+        no_enviados_ia: result.metrics?.no_enviados_ia ?? (findingsDeterministas.length - findingsParaIA.length)
+      };
+
+      if (tool === 'katana') {
+        const superficieUtil = findingsDeterministas.filter(f => f.type === 'surface').length;
+        result.metrics.superficie_util = superficieUtil;
+        result.metrics.descartados_ruido = Math.max(
+          0,
+          (result.metrics.endpoints_normalizados || result.metrics.producidos || 0) - superficieUtil
+        );
+        result.metrics.enviados_ia = 0;
+      }
+
+      if (findingsParaIA.length > 0) {
+        try {
+          enviar({ type: 'progress', tool: `ia/${tool}`, status: 'running', message: `IA explicando hallazgos de ${tool}` });
+          const findingsIA = await enriquecerFindingsIA(
+            reconocimiento.target,
+            tool,
+            findingsParaIA
+          );
+
+          if (findingsIA.length > 0) {
+            const enriquecidos = new Map(clasificarFindings(findingsIA).map(f => [f.id, f]));
+            result.findings = result.findings.map(f => enriquecidos.get(f.id) || f);
+          }
+          enviar({ type: 'progress', tool: `ia/${tool}`, status: 'done', message: `IA finalizada para ${tool}` });
+        } catch (error) {
+          enviar({ type: 'progress', tool: `ia/${tool}`, status: 'error', message: error.message });
+          result.error = [
+            result.error,
+            `IA no pudo enriquecer ${tool}: ${error.message}`
+          ].filter(Boolean).join(' | ');
+          result.findings = result.findings.map(f =>
+            findingsParaIA.some(item => item.id === f.id)
+              ? aplicarFallbackIa([f])[0]
+              : f
+          );
+        }
+      }
+
+      findings.push(...(result.findings || []));
+    }
+
+    enviar({ type: 'progress', tool: 'correlacion', status: 'running', message: 'Correlacionando hallazgos' });
+    const findingsDeduplicadosBase = deduplicarFindings(findings);
+    const correlacion = correlacionarFindings(findingsDeduplicadosBase, toolResults);
+    const findingsDeduplicados = correlacion.findings;
+    const grupos = agruparFindings(findingsDeduplicados);
+    const findingsInforme = [
+      ...grupos.confirmadas,
+      ...grupos.posibles
+    ];
+    const summaryUi = construirResumenUI(grupos);
+    const toolCounters = resumenHerramientas(reconocimiento, toolResults, findingsDeduplicados);
+    const risk = calcularRiskScore(findingsDeduplicados);
+    const serializedToolResults = Object.fromEntries(
+      Object.entries(toolResults).map(([tool, result]) => [
+        tool,
+        serializarToolResult(result)
+      ])
+    );
+    const pipelineTimeline = construirPipelineTimeline(serializedToolResults, toolCounters, correlacion.correlations, risk);
+
+    const respuesta = {
+      target: reconocimiento.target,
+      status: 'completed',
+      findings: findingsDeduplicados,
+      findings_reportables: findingsInforme,
+      groups: grupos,
+      gf_candidates: construirCandidatosGf(toolResults),
+      tool_results: serializedToolResults,
+      tool_counters: toolCounters,
+      correlations: correlacion.correlations,
+      pipeline_timeline: pipelineTimeline,
+      risk_score: risk.risk_score,
+      risk_level: risk.risk_level,
+      risk_grade: risk.risk_grade,
+      sqlmap_notice: toolResults.sqlmap?.status === 'skipped' ? toolResults.sqlmap.error : null,
+      ai_notice: findings.some(f => f.ai_status === 'failed')
+        ? 'La IA no respondio, se muestra analisis tecnico basico.'
+        : null,
+      summary_ui: summaryUi,
+      summary: resumenSeveridad(findingsInforme)
+    };
+
+    enviar({ type: 'progress', tool: 'analisis', status: 'done', message: 'Analisis completado' });
+    enviar({ type: 'result', data: respuesta });
+  } catch (error) {
+    enviar({ type: 'error', error: error.message });
+  } finally {
+    res.end();
+  }
+});
+
 app.post('/generar-informe', async (req, res) => {
   try {
     const target = req.body.target || req.body.prompt;
@@ -299,7 +606,12 @@ app.post('/generar-informe', async (req, res) => {
     const findings = normalizarFindings(req.body.findings, 'otra', target.trim());
     const informe = await generarInformeDesdeFindings(target.trim(), findings, {
       gfCandidates: req.body.gf_candidates || {},
-      toolResults: req.body.tool_results || {}
+      toolResults: req.body.tool_results || {},
+      correlations: req.body.correlations || [],
+      pipelineTimeline: req.body.pipeline_timeline || [],
+      risk_score: req.body.risk_score,
+      risk_level: req.body.risk_level,
+      risk_grade: req.body.risk_grade
     });
 
     generarPdfDesdeInforme(res, target.trim(), informe);

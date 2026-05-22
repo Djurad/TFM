@@ -164,7 +164,9 @@ sqlmap -u "https://testphp.vulnweb.com/listproducts.php?cat=1" --batch
 trufflehog filesystem ./tmp_scan --json
 ```
 
-El orden del pipeline principal es: `subfinder`, `httpx`, `feroxbuster`, `katana`, `gau`, `gf`, `nuclei`, `dalfox`, `sqlmap`, `trufflehog`.
+El orden del pipeline principal es: `subfinder`, `httpx`, `headers`, `cookies`, `httpsRedirect`, `tls`, `robotsSitemap`, `ports`, `feroxbuster`, `katana`, `gau`, `gf`, `nuclei`, `dalfox`, `sqlmap`, `trufflehog`.
+
+Los modulos `headers`, `cookies`, `httpsRedirect`, `tls` y `robotsSitemap` son pasivos/defensivos y usan APIs nativas de Node.js. `ports` usa `nmap` si esta instalado; si no, aplica un fallback TCP ligero sobre puertos comunes. Estos hallazgos se muestran como hardening, superficie o reconocimiento salvo evidencias de riesgo claro, por ejemplo certificados expirados o puertos de bases de datos/cache accesibles.
 
 Dependencias externas recomendadas en Linux/WSL:
 
@@ -178,9 +180,12 @@ go install github.com/lc/gau/v2/cmd/gau@latest
 go install github.com/tomnomnom/gf@latest
 cargo install feroxbuster
 curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh
+sudo apt install -y nmap
 ```
 
 `gf` necesita patterns en `~/.gf`; los scripts `setup.sh` y `herramientas.sh` instalan un conjunto base. En Windows nativo varias herramientas Go/Rust funcionan si estan en `PATH`, pero para TFM/demo se recomienda WSL/Linux por compatibilidad con `feroxbuster`, `gf`, `gau` y `trufflehog`.
+
+GF solo prioriza candidatos por patron; no confirma vulnerabilidades. Del mismo modo, la ausencia de cabeceras HTTP o flags de cookies se reporta como hardening/configuracion y no debe interpretarse como XSS/SQLi confirmado.
 
 Por defecto, Nuclei excluye resultados informativos y tags ruidosos como `dns`, `tech`, `waf`, `cdn` y `favicon`. Para incluir severidad `info` en modo avanzado sin tratarla como vulnerabilidad:
 
@@ -203,6 +208,10 @@ MAX_DALFOX_URLS=50
 MAX_SQLMAP_URLS=10
 MAX_JS_SECRET_SCAN=20
 TOOL_TIMEOUT_SECONDS=120
+PASSIVE_TIMEOUT_SECONDS=8
+MAX_PASSIVE_TARGETS=20
+PASSIVE_PORTS=80,443,8080,8443,8000,3000,5000,5432,3306,6379,9200,27017,22,21,25
+PORT_SCAN_TIMEOUT_MS=800
 ```
 
 ---

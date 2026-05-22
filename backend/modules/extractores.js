@@ -357,6 +357,12 @@ function findingsSqlmap(toolResult, target) {
 }
 
 function extraerFindingsDeterministas(tool, toolResult, target) {
+  if (tool === 'headers') return findingsHeaders(toolResult, target);
+  if (tool === 'cookies') return findingsCookies(toolResult, target);
+  if (tool === 'httpsRedirect') return findingsHttpsRedirect(toolResult, target);
+  if (tool === 'tls') return findingsTls(toolResult, target);
+  if (tool === 'robotsSitemap') return findingsRobotsSitemap(toolResult, target);
+  if (tool === 'ports') return findingsPorts(toolResult, target);
   if (tool === 'katana') return findingsKatana(toolResult, target);
   if (tool === 'feroxbuster') return findingsFeroxbuster(toolResult, target);
   if (tool === 'gau') return findingsGau(toolResult, target);
@@ -366,6 +372,398 @@ function extraerFindingsDeterministas(tool, toolResult, target) {
   if (tool === 'sqlmap') return findingsSqlmap(toolResult, target);
   if (tool === 'trufflehog') return findingsTrufflehog(toolResult, target);
   return [];
+}
+
+function findingBase({ id, tool, type, title, description, severity, confidence, affected_url, affected_asset, evidence, impact, recommendation, isVulnerability, false_positive_risk = 'medium', extra = {} }) {
+  return {
+    id,
+    tool,
+    type,
+    title,
+    description,
+    severity,
+    confidence,
+    affected_asset,
+    affected_url,
+    evidence,
+    impact,
+    recommendation,
+    isVulnerability,
+    isFalsePositiveLikely: false,
+    false_positive_risk,
+    ...extra
+  };
+}
+
+function datosHeader(name) {
+  const mapa = {
+    'content-security-policy': {
+      title: 'Content-Security-Policy ausente',
+      severity: 'medium',
+      impact: 'Aumenta el impacto potencial de XSS y cargas de contenido no autorizado.',
+      recommendation: 'Definir una Content-Security-Policy restrictiva y adaptada a la aplicacion.'
+    },
+    'x-frame-options': {
+      title: 'X-Frame-Options ausente',
+      severity: 'medium',
+      impact: 'Puede facilitar ataques de clickjacking si la aplicacion se embebe en frames externos.',
+      recommendation: 'Configurar X-Frame-Options DENY/SAMEORIGIN o frame-ancestors en CSP.'
+    },
+    'strict-transport-security': {
+      title: 'Strict-Transport-Security ausente',
+      severity: 'medium',
+      impact: 'Los navegadores no fuerzan HTTPS en visitas futuras, aumentando riesgo ante downgrades o enlaces HTTP.',
+      recommendation: 'Configurar HSTS con max-age adecuado y evaluar includeSubDomains/preload cuando aplique.'
+    },
+    'x-content-type-options': {
+      title: 'X-Content-Type-Options ausente',
+      severity: 'medium',
+      impact: 'Puede permitir MIME sniffing en navegadores y ampliar algunos vectores de carga de contenido.',
+      recommendation: 'Configurar X-Content-Type-Options: nosniff.'
+    },
+    'referrer-policy': {
+      title: 'Referrer-Policy ausente',
+      severity: 'low',
+      impact: 'Puede exponer rutas o parametros internos a sitios externos mediante la cabecera Referer.',
+      recommendation: 'Definir una Referrer-Policy conservadora como strict-origin-when-cross-origin.'
+    },
+    'permissions-policy': {
+      title: 'Permissions-Policy ausente',
+      severity: 'low',
+      impact: 'No se restringen explicitamente APIs sensibles del navegador.',
+      recommendation: 'Definir Permissions-Policy deshabilitando capacidades que la aplicacion no necesita.'
+    }
+  };
+
+  return mapa[name] || {
+    title: `${name} ausente`,
+    severity: 'low',
+    impact: 'Falta una cabecera de hardening.',
+    recommendation: 'Revisar la configuracion de cabeceras HTTP.'
+  };
+}
+
+function findingsHeaders(toolResult, target) {
+  const items = Array.isArray(toolResult.parsed) ? toolResult.parsed : [];
+  const findings = [];
+
+  items.forEach(item => {
+    (item.missing || []).forEach(header => {
+      const datos = datosHeader(header);
+      findings.push(findingBase({
+        id: `headers-missing-${header}-${findings.length + 1}`,
+        tool: 'headers',
+        type: 'missing_security_header',
+        title: datos.title,
+        description: `No se observo la cabecera ${header} en la respuesta HTTP.`,
+        severity: datos.severity,
+        confidence: 'medium',
+        affected_asset: target,
+        affected_url: item.url,
+        evidence: `URL: ${item.url}\nStatus: ${item.statusCode}\nCabecera ausente: ${header}`,
+        impact: datos.impact,
+        recommendation: datos.recommendation,
+        isVulnerability: true,
+        false_positive_risk: 'medium',
+        extra: { header }
+      }));
+    });
+
+    (item.banners || []).forEach(banner => {
+      findings.push(findingBase({
+        id: `headers-banner-${banner.name}-${findings.length + 1}`,
+        tool: 'headers',
+        type: 'exposed_server_banner',
+        title: `Banner HTTP expuesto: ${banner.name}`,
+        description: `La respuesta expone informacion de tecnologia mediante ${banner.name}.`,
+        severity: 'info',
+        confidence: 'low',
+        affected_asset: target,
+        affected_url: item.url,
+        evidence: `${banner.name}: ${banner.value}`,
+        impact: 'Puede ayudar al fingerprinting, pero no implica explotabilidad por si solo.',
+        recommendation: 'Reducir banners si no son necesarios y mantener componentes actualizados.',
+        isVulnerability: false,
+        false_positive_risk: 'low',
+        extra: { header: banner.name }
+      }));
+    });
+  });
+
+  return normalizarFindings(findings, 'headers', target);
+}
+
+function cookieIssues(item, cookie) {
+  const issues = [];
+  const session = cookie.isSessionCookie;
+
+  if (session && !cookie.httpOnly) {
+    issues.push({ flag: 'HttpOnly', severity: 'medium', title: `Cookie de sesion sin HttpOnly: ${cookie.name}` });
+  }
+  if (session && item.isHttps && !cookie.secure) {
+    issues.push({ flag: 'Secure', severity: 'medium', title: `Cookie de sesion sin Secure: ${cookie.name}` });
+  }
+  if (session && !cookie.sameSite) {
+    issues.push({ flag: 'SameSite', severity: 'medium', title: `Cookie de sesion sin SameSite: ${cookie.name}` });
+  }
+  if (!session && item.isHttps && !cookie.secure) {
+    issues.push({ flag: 'Secure', severity: 'low', title: `Cookie sin Secure: ${cookie.name}` });
+  }
+  if (!session && !cookie.sameSite) {
+    issues.push({ flag: 'SameSite', severity: 'low', title: `Cookie sin SameSite: ${cookie.name}` });
+  }
+
+  return issues;
+}
+
+function findingsCookies(toolResult, target) {
+  const items = Array.isArray(toolResult.parsed) ? toolResult.parsed : [];
+  const findings = [];
+
+  items.forEach(item => {
+    (item.cookies || []).forEach(cookie => {
+      const issues = cookieIssues(item, cookie);
+      if (!issues.length) return;
+      const severity = issues.some(issue => issue.severity === 'medium') ? 'medium' : 'low';
+      const flags = issues.map(issue => issue.flag);
+
+      findings.push(findingBase({
+        id: `cookies-${cookie.name}-${findings.length + 1}`,
+        tool: 'cookies',
+        type: 'insecure_cookie',
+        title: cookie.isSessionCookie
+          ? `Cookie de sesion con flags incompletos: ${cookie.name}`
+          : `Cookie con flags incompletos: ${cookie.name}`,
+        description: `La cookie ${cookie.name} no incluye todos los atributos defensivos esperados.`,
+        severity,
+        confidence: severity === 'medium' ? 'medium' : 'low',
+        affected_asset: target,
+        affected_url: item.url,
+        evidence: [
+          `Cookie: ${cookie.name}`,
+          `Flags ausentes: ${flags.join(', ')}`,
+          `Sesion: ${cookie.isSessionCookie ? 'si' : 'no'}`,
+          `Secure: ${cookie.secure ? 'si' : 'no'}`,
+          `HttpOnly: ${cookie.httpOnly ? 'si' : 'no'}`,
+          `SameSite: ${cookie.sameSite || 'ausente'}`,
+          cookie.domain ? `Domain: ${cookie.domain}` : null,
+          cookie.path ? `Path: ${cookie.path}` : null
+        ].filter(Boolean).join('\n'),
+        impact: cookie.isSessionCookie
+          ? 'Puede aumentar el riesgo de robo, exposicion o envio indebido de cookies de sesion.'
+          : 'Riesgo limitado salvo que la cookie contenga datos sensibles.',
+        recommendation: 'Configurar cookies de sesion con Secure, HttpOnly y SameSite=Lax/Strict segun el flujo de la aplicacion.',
+        isVulnerability: true,
+        false_positive_risk: cookie.isSessionCookie ? 'medium' : 'high',
+        extra: { cookieName: cookie.name, missingFlags: flags }
+      }));
+    });
+  });
+
+  return normalizarFindings(findings.slice(0, 80), 'cookies', target);
+}
+
+function findingsHttpsRedirect(toolResult, target) {
+  const items = Array.isArray(toolResult.parsed) ? toolResult.parsed : [];
+
+  return normalizarFindings(items.map((item, index) => {
+    if (item.httpAccessibleWithoutRedirect) {
+      return findingBase({
+        id: `https-redirect-missing-${index + 1}`,
+        tool: 'httpsRedirect',
+        type: 'missing_https_redirect',
+        title: 'HTTP accesible sin redireccion a HTTPS',
+        description: 'El servicio HTTP responde sin forzar redireccion a HTTPS.',
+        severity: 'medium',
+        confidence: 'medium',
+        affected_asset: target,
+        affected_url: item.url,
+        evidence: `Status HTTP: ${item.statusCode}\nLocation: ${item.location || 'ausente'}`,
+        impact: 'Usuarios o enlaces HTTP pueden quedar expuestos a trafico sin cifrar o downgrade.',
+        recommendation: 'Redirigir todo HTTP a HTTPS con 301/308 y mantener HSTS en HTTPS.',
+        isVulnerability: true
+      });
+    }
+
+    return findingBase({
+      id: `https-redirect-ok-${index + 1}`,
+      tool: 'httpsRedirect',
+      type: 'reconocimiento',
+      title: item.redirectsToHttps ? 'HTTP redirige correctamente a HTTPS' : 'HTTP no disponible o sin evidencia negativa',
+      description: 'Resultado informativo de comprobacion HTTP a HTTPS.',
+      severity: 'info',
+      confidence: 'low',
+      affected_asset: target,
+      affected_url: item.url,
+      evidence: `Status HTTP: ${item.statusCode}\nLocation: ${item.location || 'ausente'}`,
+      impact: '',
+      recommendation: '',
+      isVulnerability: false
+    });
+  }), 'httpsRedirect', target);
+}
+
+function findingsTls(toolResult, target) {
+  const items = Array.isArray(toolResult.parsed) ? toolResult.parsed : [];
+  const findings = [];
+
+  items.forEach((item, index) => {
+    if (item.tlsError) {
+      findings.push(findingBase({
+        id: `tls-error-${index + 1}`,
+        tool: 'tls',
+        type: 'tls_certificate_issue',
+        title: 'Error TLS al conectar',
+        description: 'No se pudo completar correctamente la conexion TLS.',
+        severity: 'medium',
+        confidence: 'medium',
+        affected_asset: item.host || target,
+        affected_url: item.host ? `https://${item.host}` : null,
+        evidence: item.error || 'Error TLS',
+        impact: 'Puede impedir conexiones seguras o indicar configuracion TLS defectuosa.',
+        recommendation: 'Revisar certificado, cadena de confianza, SNI y configuracion TLS.',
+        isVulnerability: true
+      }));
+      return;
+    }
+
+    if (item.expired || item.nearExpiry || item.authorizationError) {
+      findings.push(findingBase({
+        id: `tls-cert-${index + 1}`,
+        tool: 'tls',
+        type: 'tls_certificate_issue',
+        title: item.expired
+          ? 'Certificado TLS expirado'
+          : item.nearExpiry
+            ? 'Certificado TLS proximo a expirar'
+            : 'Certificado TLS con error de validacion',
+        description: 'Se detecto un problema de validez o confianza del certificado TLS.',
+        severity: item.expired ? 'high' : item.nearExpiry ? 'low' : 'medium',
+        confidence: item.expired || item.authorizationError ? 'high' : 'medium',
+        affected_asset: item.host || target,
+        affected_url: item.host ? `https://${item.host}` : null,
+        evidence: [
+          `Host: ${item.host}`,
+          `Valido hasta: ${item.validTo || 'desconocido'}`,
+          typeof item.daysRemaining === 'number' ? `Dias restantes: ${item.daysRemaining}` : null,
+          item.authorizationError ? `Error: ${item.authorizationError}` : null,
+          item.issuer ? `Issuer: ${JSON.stringify(item.issuer)}` : null
+        ].filter(Boolean).join('\n'),
+        impact: 'Puede degradar la confianza del usuario o romper conexiones seguras.',
+        recommendation: 'Renovar el certificado y corregir la cadena de confianza antes de la expiracion.',
+        isVulnerability: true
+      }));
+      return;
+    }
+
+    findings.push(findingBase({
+      id: `tls-info-${index + 1}`,
+      tool: 'tls',
+      type: 'reconocimiento',
+      title: 'Certificado TLS valido',
+      description: 'Informacion basica del certificado TLS observado.',
+      severity: 'info',
+      confidence: 'low',
+      affected_asset: item.host || target,
+      affected_url: item.host ? `https://${item.host}` : null,
+      evidence: `Valido hasta: ${item.validTo || 'desconocido'}\nProtocolo: ${item.protocol || 'desconocido'}\nCipher: ${item.cipher || 'desconocido'}`,
+      impact: '',
+      recommendation: '',
+      isVulnerability: false
+    }));
+  });
+
+  return normalizarFindings(findings, 'tls', target);
+}
+
+function findingsRobotsSitemap(toolResult, target) {
+  const items = Array.isArray(toolResult.parsed) ? toolResult.parsed : [];
+  const findings = [];
+
+  items.forEach((item, index) => {
+    if (item.exists) {
+      findings.push(findingBase({
+        id: `robots-sitemap-info-${index + 1}`,
+        tool: 'robotsSitemap',
+        type: 'reconocimiento',
+        title: `${item.path} encontrado`,
+        description: 'Recurso publico de descubrimiento encontrado.',
+        severity: 'info',
+        confidence: 'low',
+        affected_asset: target,
+        affected_url: item.url,
+        evidence: `Status: ${item.statusCode}\nEntradas: ${(item.entries || []).length}`,
+        impact: 'Puede ayudar a entender estructura publica del sitio.',
+        recommendation: 'No incluir rutas sensibles en robots.txt y revisar que sitemap solo publique contenido esperado.',
+        isVulnerability: false
+      }));
+    }
+
+    (item.sensitiveEntries || []).forEach(entry => {
+      findings.push(findingBase({
+        id: `robots-sensitive-${findings.length + 1}`,
+        tool: 'robotsSitemap',
+        type: 'robots_sensitive_path',
+        title: 'robots.txt revela ruta sensible',
+        description: 'robots.txt contiene una ruta que parece sensible o util para reconocimiento.',
+        severity: 'low',
+        confidence: 'low',
+        affected_asset: target,
+        affected_url: item.url,
+        evidence: `${entry.directive}: ${entry.value}`,
+        impact: 'Puede facilitar el descubrimiento manual de paneles, backups o rutas internas.',
+        recommendation: 'No usar robots.txt como mecanismo de proteccion; proteger rutas sensibles con autenticacion/autorizacion.',
+        isVulnerability: false,
+        false_positive_risk: 'medium'
+      }));
+    });
+  });
+
+  return normalizarFindings(findings, 'robotsSitemap', target);
+}
+
+function findingsPorts(toolResult, target) {
+  const items = Array.isArray(toolResult.parsed) ? toolResult.parsed : [];
+
+  return normalizarFindings(items.map((item, index) => {
+    if (item.category === 'data-store') {
+      return findingBase({
+        id: `ports-data-${item.port}-${index + 1}`,
+        tool: 'ports',
+        type: 'exposed_port',
+        title: `Puerto de datos expuesto: ${item.port}`,
+        description: 'Se detecto un puerto comun de base de datos/cache accesible por TCP.',
+        severity: item.port === 6379 || item.port === 27017 ? 'critical' : 'high',
+        confidence: 'high',
+        affected_asset: item.host || target,
+        affected_url: `${item.host || target}:${item.port}`,
+        evidence: `Puerto ${item.port}/tcp abierto${item.service ? ` (${item.service})` : ''}. Fuente: ${item.source}`,
+        impact: 'Un servicio de datos expuesto puede permitir acceso no autorizado si no esta protegido por red y autenticacion fuerte.',
+        recommendation: 'Restringir por firewall/VPC, exigir autenticacion fuerte y no exponer bases de datos/cache a Internet.',
+        isVulnerability: true,
+        false_positive_risk: 'medium',
+        extra: { port: item.port }
+      });
+    }
+
+    return findingBase({
+      id: `ports-open-${item.port}-${index + 1}`,
+      tool: 'ports',
+      type: item.category === 'web-alt' ? 'surface' : 'exposed_port',
+      title: item.category === 'web-alt' ? `Puerto web alternativo expuesto: ${item.port}` : `Puerto abierto: ${item.port}`,
+      description: 'Se detecto un puerto TCP abierto durante el escaneo ligero.',
+      severity: item.category === 'web-alt' ? 'low' : 'info',
+      confidence: 'low',
+      affected_asset: item.host || target,
+      affected_url: `${item.host || target}:${item.port}`,
+      evidence: `Puerto ${item.port}/tcp abierto${item.service ? ` (${item.service})` : ''}. Fuente: ${item.source}`,
+      impact: item.category === 'web-alt' ? 'Amplia la superficie web a revisar.' : 'Dato de exposicion de servicio para inventario.',
+      recommendation: 'Validar si el servicio debe estar expuesto y aplicar filtrado de red cuando no sea necesario.',
+      isVulnerability: false,
+      false_positive_risk: 'medium',
+      extra: { port: item.port }
+    });
+  }), 'ports', target);
 }
 
 function findingsGau(toolResult, target) {

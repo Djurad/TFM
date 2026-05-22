@@ -3,7 +3,6 @@ const btnGenerarInforme = document.getElementById('btnGenerarInforme');
 const btnNuevoAnalisis = document.getElementById('btnNuevoAnalisis');
 const promptInput = document.getElementById('prompt');
 const estado = document.getElementById('estado');
-const resumen = document.getElementById('resumen');
 const resultados = document.getElementById('resultados');
 const herramientas = document.getElementById('herramientas');
 
@@ -44,16 +43,6 @@ const severityLabels = {
   medium: 'MEDIUM',
   low: 'LOW',
   info: 'INFO'
-};
-
-const groupLabels = {
-  confirmadas: '[!] CONFIRMADAS',
-  posibles: '[?] POSIBLES',
-  total_vulnerabilidades: '[+] REPORTABLES',
-  hardening: '[#] HARDENING',
-  superficie: '[+] SUPERFICIE',
-  reconocimiento: '[i] INFO',
-  descartados: '[x] DESCARTADOS'
 };
 
 function setEstado(texto, tipo = '') {
@@ -199,44 +188,6 @@ function normalizarGrupos(data = {}) {
   };
 }
 
-function calcularRiesgo(summary = {}) {
-  const total = ['confirmadas', 'posibles', 'hardening', 'superficie', 'reconocimiento']
-    .reduce((sum, key) => sum + Number(summary[key] || 0), 0);
-  if (!total) return { score: null, rating: 'N/D', label: 'Sin datos suficientes' };
-
-  const penalty = Math.min(85,
-    (summary.confirmadas || 0) * 18 +
-    (summary.posibles || 0) * 7 +
-    (summary.hardening || 0) * 2 +
-    (summary.superficie || 0)
-  );
-  const score = Math.max(15, 100 - penalty);
-  const rating = score >= 90 ? 'A' : score >= 75 ? 'B' : score >= 60 ? 'C' : score >= 40 ? 'D' : 'E';
-  const label = score >= 75 ? 'Riesgo Bajo' : score >= 60 ? 'Riesgo Medio' : score >= 40 ? 'Riesgo Alto' : 'Riesgo Critico';
-  return { score, rating, label };
-}
-
-function barraRiesgo(score) {
-  const bloques = 16;
-  const llenos = Math.round((score / 100) * bloques);
-  return `[${'█'.repeat(llenos)}${'░'.repeat(bloques - llenos)}] ${score}/100`;
-}
-
-function renderResumen(summary = {}) {
-  if (!resumen) return;
-  resumen.innerHTML = '';
-  const keys = ['confirmadas', 'posibles', 'hardening', 'superficie', 'reconocimiento', 'descartados', 'total_vulnerabilidades'];
-
-  keys.forEach(key => {
-    const item = document.createElement('div');
-    item.className = `summary-item summary-${key}`;
-    item.innerHTML = `
-      <strong>${escaparHtml(summary[key] || 0)}</strong>
-      <span>${escaparHtml(groupLabels[key])}</span>
-    `;
-    resumen.appendChild(item);
-  });
-}
 
 function estadoHerramienta(status = '') {
   const lower = String(status || '').toLowerCase();
@@ -306,112 +257,6 @@ function renderHerramientas(toolResults = {}) {
     `;
     herramientas.appendChild(log);
   }
-}
-
-function badgeFinding(finding) {
-  if (finding.type === 'surface') return { label: 'SUPERFICIE', className: 'badge-surface' };
-  if (hardeningTypes.includes(finding.type)) return { label: 'HARDENING', className: 'badge-possible' };
-  if (finding.type === 'discarded') return { label: 'DESCARTADO', className: 'badge-discarded' };
-  if (!finding.isVulnerability || finding.type === 'reconocimiento') return { label: 'INFO', className: 'badge-info' };
-  if (finding.confidence === 'high') return { label: 'CONFIRMADA', className: 'badge-confirmed' };
-  return { label: 'POSIBLE', className: 'badge-possible' };
-}
-
-function crearCardFinding(finding, modo = 'vulnerability') {
-  const severity = finding.severity || 'info';
-  const card = document.createElement('article');
-  const badge = badgeFinding(finding);
-  card.className = `finding finding-${modo} severity-${severity}`;
-  card.innerHTML = `
-    <header>
-      <div>
-        <span class="badge">${escaparHtml(fallback(finding.tool, 'tool'))}</span>
-        <span class="badge ${badge.className}">${escaparHtml(badge.label)}</span>
-      </div>
-      <span class="severity severity-${escaparHtml(severity)}">${severityLabels[severity] || escaparHtml(severity)}</span>
-    </header>
-    <h2>${escaparHtml(fallback(finding.title, 'Hallazgo sin titulo'))}</h2>
-    <p>${escaparHtml(fallback(finding.description, 'No disponible'))}</p>
-    <dl>
-      <dt>Severidad</dt>
-      <dd>${escaparHtml(severityLabels[severity] || severity)}</dd>
-      <dt>Confianza</dt>
-      <dd>${escaparHtml(fallback(finding.confidence, '-'))}</dd>
-      ${finding.cwe ? `<dt>CWE</dt><dd>${escaparHtml(finding.cwe)}</dd>` : ''}
-      <dt>Activo</dt>
-      <dd><div class="mono-box">${escaparHtml(fallback(finding.affected_url || finding.affected_asset, '-'))}</div></dd>
-      <dt>Evidencia</dt>
-      <dd>${escaparHtml(fallback(finding.evidence, 'Sin evidencia detallada'))}</dd>
-      <dt>Impacto</dt>
-      <dd>${escaparHtml(fallback(finding.impact, 'No disponible'))}</dd>
-      <dt>Recomendacion</dt>
-      <dd>${escaparHtml(fallback(finding.recommendation, 'No disponible'))}</dd>
-      ${finding.isFalsePositiveLikely ? `<dt>Falso positivo</dt><dd>${escaparHtml(fallback(finding.falsePositiveReason, 'Baja confianza o evidencia limitada.'))}</dd>` : ''}
-    </dl>
-  `;
-  return card;
-}
-
-function ordenFindings(a, b) {
-  const pesos = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
-  return (pesos[a.severity] ?? 9) - (pesos[b.severity] ?? 9);
-}
-
-function listaCompacta(findings = [], limite = 8, badgeFn = null) {
-  if (!findings.length) return '<p class="empty">Sin datos disponibles.</p>';
-  return `
-    <ul class="compact-list">
-      ${findings.slice(0, limite).map(f => `
-        <li>
-          <span>${escaparHtml(f.title || f.affected_url || f.affected_asset || '-')}</span>
-          <span class="terminal-badge ${f.severity ? `severity-${escaparHtml(f.severity)}` : ''}">${escaparHtml(badgeFn ? badgeFn(f) : (f.severity || f.tool || '--'))}</span>
-        </li>
-      `).join('')}
-    </ul>
-  `;
-}
-
-function extraerPuertos(findings = []) {
-  const vistos = new Set();
-  return findings
-    .filter(f => f.tool === 'ports')
-    .map(f => {
-      const raw = f.affected_url || '';
-      const match = raw.match(/:(\d+)$/);
-      return {
-        port: f.port || (match ? Number(match[1]) : null),
-        state: 'open',
-        service: f.title || f.type || '-'
-      };
-    })
-    .filter(item => item.port)
-    .filter(item => {
-      const key = `${item.port}/tcp`;
-      if (vistos.has(key)) return false;
-      vistos.add(key);
-      return true;
-    });
-}
-
-function renderPuertos(puertos = []) {
-  if (!puertos.length) return '<p class="empty">Sin puertos abiertos reportados.</p>';
-  return `
-    <div class="terminal-table-wrap">
-      <table class="terminal-table">
-        <thead><tr><th>PUERTO</th><th>ESTADO</th><th>SERVICIO</th></tr></thead>
-        <tbody>
-          ${puertos.map(p => `<tr><td>${escaparHtml(p.port)}/tcp</td><td>${escaparHtml(p.state)}</td><td>${escaparHtml(p.service)}</td></tr>`).join('')}
-        </tbody>
-      </table>
-    </div>
-  `;
-}
-
-function barraRiesgoTerminal(score) {
-  if (score === null || score === undefined) return '[----------------] N/D';
-  const bloques = 16;
-  const llenos = Math.round((score / 100) * bloques);
-  return `[${'#'.repeat(llenos)}${'-'.repeat(bloques - llenos)}] ${score}/100`;
 }
 
 function categoriaFinding(finding = {}) {
@@ -693,67 +538,11 @@ function renderCorrelaciones(correlations = []) {
   `;
 }
 
-function renderDashboardTop(data, grupos, summary) {
-  const risk = calcularRiesgo(summary);
-  const riskSeverity = risk.score === null ? 'info' : risk.score < 40 ? 'critical' : risk.score < 60 ? 'high' : risk.score < 75 ? 'medium' : 'low';
-  const now = new Date().toLocaleString();
-  const totalFindings = (data.findings || []).length;
-  return `
-    <section class="dashboard-top">
-      <article class="terminal-card">
-        <h2>OBJETIVO</h2>
-        <div class="target-value">${escaparHtml(fallback(data.target, 'sin objetivo'))}</div>
-        <p class="terminal-subtle">Analisis completado</p>
-        <p class="terminal-subtle">Fecha: ${escaparHtml(now)}</p>
-        <p class="terminal-subtle">Duracion: --</p>
-      </article>
-      <article class="terminal-card">
-        <h2>RATING</h2>
-        <div class="rating-letter">${escaparHtml(risk.rating)}</div>
-        <div>${escaparHtml(risk.score === null ? 'N/D' : risk.score)} / 100 puntos</div>
-        <div class="terminal-badge severity-${riskSeverity}">${escaparHtml(risk.label)}</div>
-      </article>
-      <article class="terminal-card">
-        <h2>RESUMEN</h2>
-        <p class="terminal-subtle">
-          ${escaparHtml(totalFindings)} hallazgos correlacionados:
-          ${escaparHtml(grupos.confirmadas.length)} confirmadas,
-          ${escaparHtml(grupos.posibles.length)} posibles,
-          ${escaparHtml(grupos.hardening.length)} de hardening y
-          ${escaparHtml(grupos.superficie.length)} de superficie.
-        </p>
-        <div class="risk-bar">${escaparHtml(barraRiesgoTerminal(risk.score))}</div>
-      </article>
-    </section>
-  `;
-}
-
 function renderFindings(findings = [], groups = null) {
   resultados.innerHTML = '';
   const data = ultimoAnalisis || { findings, groups };
   const grupos = normalizarGrupos(data);
-  const summary = data.summary_ui || {
-    confirmadas: grupos.confirmadas.length,
-    posibles: grupos.posibles.length,
-    hardening: grupos.hardening.length,
-    superficie: grupos.superficie.length,
-    reconocimiento: grupos.reconocimiento.length,
-    descartados: grupos.descartados.length,
-    total_vulnerabilidades: grupos.confirmadas.length + grupos.posibles.length
-  };
-  const displaySummary = {
-    ...summary,
-    confirmadas: grupos.confirmadas.length,
-    posibles: grupos.posibles.length,
-    hardening: grupos.hardening.length,
-    superficie: grupos.superficie.length,
-    reconocimiento: grupos.reconocimiento.length,
-    descartados: grupos.descartados.length,
-    total_vulnerabilidades: grupos.confirmadas.length + grupos.posibles.length
-  };
   const infoFindings = grupos.reconocimiento || [];
-  const puertos = extraerPuertos([...(data.findings || []), ...grupos.superficie, ...infoFindings]);
-  const risk = calcularRiesgo(displaySummary);
   const allFindings = [
     ...grupos.confirmadas,
     ...grupos.posibles,
@@ -800,7 +589,6 @@ btnAnalizar.addEventListener('click', async () => {
   progressEvents = [];
   livePipeline = crearPipelineInicial();
   btnGenerarInforme.disabled = true;
-  renderResumen();
   herramientas.innerHTML = '';
   resultados.innerHTML = renderPipelineTimeline(livePipeline);
   renderProgreso({ tool: 'analisis', status: 'running', message: `Preparando analisis para ${prompt}` });
@@ -887,7 +675,6 @@ if (btnNuevoAnalisis) {
     progressEvents = [];
     promptInput.value = '';
     btnGenerarInforme.disabled = true;
-    renderResumen();
     herramientas.innerHTML = '';
     resultados.innerHTML = '';
     setEstado('');

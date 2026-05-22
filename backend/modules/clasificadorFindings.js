@@ -39,19 +39,6 @@ const RUTAS_STATIC = [
   '/js/'
 ];
 
-const TIPOS_IA_PERMITIDOS = [
-  'xss',
-  'sqli',
-  'lfi',
-  'rce',
-  'ssrf',
-  'open redirect',
-  'auth bypass',
-  'idor',
-  'secret',
-  'secrets'
-];
-
 const SEVERITY_MAP = {
   critical: 'critical',
   high: 'high',
@@ -131,13 +118,6 @@ function tieneEvidenciaExplotable(finding) {
     'xss',
     'cve-'
   ].some(token => texto.includes(token));
-}
-
-function esTipoPermitidoIA(finding) {
-  const texto = textoFinding(finding);
-  return TIPOS_IA_PERMITIDOS.some(tipo => texto.includes(tipo)) ||
-    finding.cwe === 'CWE-79' ||
-    finding.cwe === 'CWE-89';
 }
 
 function recomendacionPorTipo(type, tool) {
@@ -373,26 +353,8 @@ function clasificarFindings(findings = []) {
   return Array.isArray(findings) ? findings.map(clasificarFinding) : [];
 }
 
-function debeEnviarIA(finding) {
-  if (!finding || finding.isVulnerability !== true) return false;
-  if (['subfinder', 'httpx', 'katana', 'gau', 'gf'].includes(finding.tool)) return false;
-  if (finding.tool === 'trufflehog') return finding.type === 'exposed-secret' && ['medium', 'high'].includes(finding.confidence);
-  if (esAssetEstatico(obtenerUrlFinding(finding))) return false;
-  if (finding.type === 'reconocimiento' || finding.type === 'surface' || finding.type === 'discarded') return false;
-  if (finding.tool === 'nuclei') {
-    return ['medium', 'high', 'critical'].includes(finding.severity) &&
-      tieneEvidenciaExplotable(finding) &&
-      !esReconocimientoNuclei(finding);
-  }
-  if (finding.tool === 'sqlmap') return ['confirmed_sqli', 'possible_sqli'].includes(finding.status);
-  if (finding.tool === 'dalfox') return true;
-  if (finding.tool === 'feroxbuster') return finding.type === 'vulnerability' && finding.confidence === 'medium';
-  return esTipoPermitidoIA(finding) && ['medium', 'high'].includes(finding.confidence);
-}
-
 module.exports = {
   clasificarFinding,
   clasificarFindings,
-  debeEnviarIA,
   esAssetEstatico
 };

@@ -437,9 +437,13 @@ function contarDescartadosNuclei(lineas = []) {
 }
 
 async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
+  const scanLogger = opciones.scanLogger || null;
   const onProgress = typeof opciones.onProgress === 'function' ? opciones.onProgress : null;
   const progreso = (tool, status, message, extra = {}) => {
     if (onProgress) onProgress({ tool, status, message, ...extra });
+  };
+  const logVar = (name, value) => {
+    if (scanLogger?.variable) scanLogger.variable(name, value);
   };
   const entrada = normalizarEntrada(targetOriginal);
   let target = entrada.domain;
@@ -458,6 +462,10 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
     throw new Error('Target no valido. Usa un dominio, por ejemplo: testphp.vulnweb.com');
   }
 
+  logVar('targetOriginal', targetOriginal);
+  logVar('entrada', entrada);
+  logVar('target', target);
+
   const toolResults = {};
   const includeNucleiInfo = process.env.NUCLEI_INCLUDE_INFO === 'true';
   const sqlmapCrawlIfNoParams = process.env.SQLMAP_CRAWL_IF_NO_PARAMS === 'true';
@@ -473,10 +481,13 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
     try {
       progreso(nombre, 'running', `Ejecutando ${nombre}`);
       registrarPaso(nombre, 'ejecutando herramienta', { entrada: target, comando });
+      logVar(`${nombre}.comando`, comando);
       const raw = await ejecutarComando(comando, {
         permitirFalloSinSalida: nombre === 'nuclei'
       });
+      logVar(`${nombre}.raw`, raw);
       const parsed = parser(raw);
+      logVar(`${nombre}.parsed`, parsed);
       const parsedCount = Array.isArray(parsed) ? parsed.length : 0;
       registrarPaso(nombre, 'resultados producidos', { resultados: parsedCount });
 
@@ -486,6 +497,7 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
         parsed,
         findings: []
       };
+      logVar(`toolResults.${nombre}`, toolResults[nombre]);
       progreso(nombre, 'done', `${nombre} finalizado`, { count: parsedCount });
 
       return raw;
@@ -497,6 +509,7 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
         findings: [],
         error: error.message
       };
+      logVar(`toolResults.${nombre}`, toolResults[nombre]);
       progreso(nombre, 'error', error.message);
 
       console.error(`Error en ${nombre}:`, error.message);
@@ -508,11 +521,16 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
     try {
       progreso(nombre, 'running', `Ejecutando ${nombre}`);
       registrarPaso(nombre, 'ejecutando herramienta', { entrada: target, binario, args });
+      logVar(`${nombre}.binario`, binario);
+      logVar(`${nombre}.args`, args);
+      logVar(`${nombre}.input`, input);
       const raw = await ejecutarConInput(binario, args, input, {
         timeout: timeoutMs,
         permitirFalloSinSalida: nombre === 'nuclei' || opciones.permitirFalloSinSalida
       });
+      logVar(`${nombre}.raw`, raw);
       const parsed = parser(raw);
+      logVar(`${nombre}.parsed`, parsed);
       const parsedCount = Array.isArray(parsed) ? parsed.length : 0;
       registrarPaso(nombre, 'resultados producidos', { resultados: parsedCount });
 
@@ -522,6 +540,7 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
         parsed,
         findings: []
       };
+      logVar(`toolResults.${nombre}`, toolResults[nombre]);
       progreso(nombre, 'done', `${nombre} finalizado`, { count: parsedCount });
 
       return raw;
@@ -533,6 +552,7 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
         findings: [],
         error: error.message
       };
+      logVar(`toolResults.${nombre}`, toolResults[nombre]);
       progreso(nombre, 'error', error.message);
 
       console.error(`Error en ${nombre}:`, error.message);
@@ -555,13 +575,16 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
         try {
           progreso('subfinder', 'running', 'Buscando subdominios');
           registrarPaso('subfinder', 'ejecutando herramienta', { entrada: target, binario: 'subfinder' });
+          logVar('subfinder.args', ['-d', target, '-silent']);
           const raw = await ejecutarBinario('subfinder', ['-d', target, '-silent'], { timeout: timeoutMs });
+          logVar('subfinder.raw', raw);
           toolResults.subfinder = {
             status: 'success',
             raw,
             parsed: parsearLineas(raw),
             findings: []
           };
+          logVar('toolResults.subfinder', toolResults.subfinder);
           progreso('subfinder', 'done', 'Subfinder finalizado', { count: toolResults.subfinder.parsed.length });
           return raw;
         } catch (error) {
@@ -572,6 +595,7 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
             findings: [],
             error: error.message
           };
+          logVar('toolResults.subfinder', toolResults.subfinder);
           progreso('subfinder', 'error', error.message);
           console.error('Error en subfinder:', error.message);
           return '';
@@ -586,14 +610,18 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
       findings: [],
       error: 'subfinder no aplica a targets locales o direcciones IP'
     };
+    logVar('toolResults.subfinder', toolResults.subfinder);
     progreso('subfinder', 'skipped', 'Subfinder no aplica a targets locales o IP');
   }
 
   let subdominios = parsearLineas(subfinderOutput);
+  logVar('subfinderOutput', subfinderOutput);
 
   subdominios = deduplicarUrls([...subdominios, target]);
+  logVar('subdominios', subdominios);
 
   const inputHttpx = deduplicarUrls([...subdominios, entrada.inputUrl, entrada.baseUrl]).join('\n');
+  logVar('inputHttpx', inputHttpx);
 
   const httpxOutput = await ejecutarHerramientaInput(
     'httpx',
@@ -604,26 +632,36 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
   );
 
   const httpx = parsearHttpxJson(httpxOutput);
+  logVar('httpxOutput', httpxOutput);
+  logVar('httpx', httpx);
   const activos = deduplicarUrls(httpx.map(item => item.finalUrl || item.url).filter(Boolean));
+  logVar('activos', activos);
   const inputKatana = activos.join('\n');
+  logVar('inputKatana', inputKatana);
 
   progreso('headers', 'running', 'Analizando cabeceras HTTP');
   toolResults.headers = await ejecutarHeaders(activos, { timeoutMs: passiveTimeoutMs });
+  logVar('toolResults.headers', toolResults.headers);
   progreso('headers', toolResults.headers.status || 'done', 'Cabeceras HTTP finalizadas');
   progreso('cookies', 'running', 'Analizando cookies');
   toolResults.cookies = await ejecutarCookies(activos, { timeoutMs: passiveTimeoutMs });
+  logVar('toolResults.cookies', toolResults.cookies);
   progreso('cookies', toolResults.cookies.status || 'done', 'Cookies finalizadas');
   progreso('httpsRedirect', 'running', 'Comprobando redireccion HTTPS');
   toolResults.httpsRedirect = await ejecutarHttpsRedirect(target, { timeoutMs: passiveTimeoutMs });
+  logVar('toolResults.httpsRedirect', toolResults.httpsRedirect);
   progreso('httpsRedirect', toolResults.httpsRedirect.status || 'done', 'Redireccion HTTPS finalizada');
   progreso('tls', 'running', 'Revisando TLS y certificados');
   toolResults.tls = await ejecutarTls(activos, { timeoutMs: passiveTimeoutMs });
+  logVar('toolResults.tls', toolResults.tls);
   progreso('tls', toolResults.tls.status || 'done', 'TLS finalizado');
   progreso('robotsSitemap', 'running', 'Leyendo robots.txt y sitemap.xml');
   toolResults.robotsSitemap = await ejecutarRobotsSitemap(activos, { timeoutMs: passiveTimeoutMs });
+  logVar('toolResults.robotsSitemap', toolResults.robotsSitemap);
   progreso('robotsSitemap', toolResults.robotsSitemap.status || 'done', 'Robots y sitemap finalizados');
   progreso('ports', 'running', 'Comprobando puertos expuestos');
   toolResults.ports = await ejecutarPorts(target, { timeoutMs: passiveTimeoutMs });
+  logVar('toolResults.ports', toolResults.ports);
   progreso('ports', toolResults.ports.status || 'done', 'Puertos finalizados');
 
   progreso('feroxbuster', 'running', 'Descubriendo rutas');
@@ -637,8 +675,12 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
         error: 'No hay activos HTTP para analizar con feroxbuster.',
         metrics: { endpoints_encontrados: 0, rutas_interesantes: 0, posibles_vulnerabilidades: 0 }
       };
+  logVar('feroxResult', feroxResult);
   toolResults.feroxbuster = feroxResult;
+  logVar('toolResults.feroxbuster', toolResults.feroxbuster);
   progreso('feroxbuster', feroxResult.status || 'done', 'Feroxbuster finalizado');
+
+  logVar('inputKatana', inputKatana);
 
   const katanaOutput = activos.length > 0
     ? await ejecutarHerramientaInput(
@@ -657,6 +699,7 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
       findings: [],
       error: 'No hay activos HTTP para rastrear.'
     };
+    logVar('toolResults.katana', toolResults.katana);
   }
 
   const endpointUrlsCrudosSinDedup = [
@@ -668,6 +711,12 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
   const endpointUrls = endpointUrlsCrudos.filter(url => !esAssetEstatico(url));
   const assetsIgnorados = endpointUrlsCrudos.length - endpointUrls.length;
   const duplicadosKatana = Math.max(0, endpointUrlsCrudosSinDedup.filter(Boolean).length - endpointUrlsCrudos.length);
+  logVar('katanaOutput', katanaOutput);
+  logVar('endpointUrlsCrudosSinDedup', endpointUrlsCrudosSinDedup);
+  logVar('endpointUrlsCrudos', endpointUrlsCrudos);
+  logVar('endpointUrls', endpointUrls);
+  logVar('assetsIgnorados', assetsIgnorados);
+  logVar('duplicadosKatana', duplicadosKatana);
 
   progreso('gau', 'running', 'Recuperando URLs historicas');
   const gauResult = targetLocal
@@ -685,7 +734,9 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
         }
       }
     : await ejecutarGau(target, { maxUrls: maxGauUrls, timeoutMs });
+  logVar('gauResult', gauResult);
   toolResults.gau = gauResult;
+  logVar('toolResults.gau', toolResults.gau);
   progreso('gau', gauResult.status || 'done', 'GAU finalizado');
 
   const endpointsKatana = endpointUrls.map(url => crearEndpoint(url, 'katana', buscarHttpInfo(url, httpx)));
@@ -696,6 +747,10 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
     ...endpointsGau,
     ...endpointsFerox
   ]);
+  logVar('endpointsKatana', endpointsKatana);
+  logVar('endpointsGau', endpointsGau);
+  logVar('endpointsFerox', endpointsFerox);
+  logVar('endpoints', endpoints);
   registrarPaso('katana', 'endpoints normalizados', {
     resultados: endpointsKatana.length,
     totalFusionado: endpoints.length,
@@ -729,11 +784,14 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
       duplicados_descartados: duplicadosKatana,
       enviados_ia: 0
     };
+    logVar('toolResults.katana', toolResults.katana);
   }
 
   progreso('gf', 'running', 'Priorizando candidatos con GF');
   const gfResult = await ejecutarGf(endpoints, { timeoutMs });
+  logVar('gfResult', gfResult);
   toolResults.gf = gfResult;
+  logVar('toolResults.gf', toolResults.gf);
   progreso('gf', gfResult.status || 'done', 'GF finalizado');
 
   const endpointsConParametros = endpoints.filter(endpoint => endpoint.hasParams);
@@ -742,10 +800,18 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
   const gfUtil = ['success', 'partial'].includes(gfResult.status);
   const xssDesdeGf = gfUtil ? (gfBuckets.xssCandidates || []) : [];
   const sqliDesdeGf = gfUtil ? (gfBuckets.sqliCandidates || []) : [];
+  logVar('endpointsConParametros', endpointsConParametros);
+  logVar('urlsParametrizadas', urlsParametrizadas);
+  logVar('gfBuckets', gfBuckets);
+  logVar('xssDesdeGf', xssDesdeGf);
+  logVar('sqliDesdeGf', sqliDesdeGf);
 
   const inputNuclei = activos.join('\n');
   const severidadesNuclei = includeNucleiInfo ? 'info,low,medium,high,critical' : 'low,medium,high,critical';
   const excludeTags = 'dns,tech,waf,cdn,favicon';
+  logVar('inputNuclei', inputNuclei);
+  logVar('severidadesNuclei', severidadesNuclei);
+  logVar('excludeTags', excludeTags);
 
   const nucleiOutput = activos.length > 0
     ? await ejecutarHerramientaInput(
@@ -766,9 +832,12 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
       findings: [],
       error: 'No hay activos HTTP para analizar con nuclei.'
     };
+    logVar('toolResults.nuclei', toolResults.nuclei);
   }
 
   const vulnerabilidades = parsearLineas(nucleiOutput);
+  logVar('nucleiOutput', nucleiOutput);
+  logVar('vulnerabilidades', vulnerabilidades);
   registrarPaso('nuclei', 'ruido informativo/fingerprinting descartado por configuracion o clasificador', {
     descartados: contarDescartadosNuclei(vulnerabilidades),
     includeInfo: includeNucleiInfo
@@ -779,6 +848,8 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
     xssDesdeGf.length ? maxDalfoxUrls : Math.min(maxDalfoxUrls, 30)
   );
   const inputDalfox = urlsDalfox.join('\n');
+  logVar('urlsDalfox', urlsDalfox);
+  logVar('inputDalfox', inputDalfox);
 
   console.log(`[dalfox] URLs recibidas desde gf xss: ${xssDesdeGf.length}`);
 
@@ -800,10 +871,13 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
       findings: [],
       error: 'No hay endpoints con parametros para probar XSS.'
     };
+    logVar('toolResults.dalfox', toolResults.dalfox);
   }
   progreso('dalfox', toolResults.dalfox?.status || 'done', 'Dalfox finalizado');
 
   const dalfox = parsearDalfox(dalfoxOutput);
+  logVar('dalfoxOutput', dalfoxOutput);
+  logVar('dalfox', dalfox);
 
   console.log(`[sqlmap] URLs recibidas desde gf sqli: ${sqliDesdeGf.length}`);
 
@@ -817,6 +891,7 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
   }
 
   candidatosSqlmap = deduplicarPorPatron(candidatosSqlmap);
+  logVar('candidatosSqlmap', candidatosSqlmap);
 
   const sqlmap = [];
 
@@ -830,7 +905,10 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
         { timeout: timeoutMs }
       );
 
-      sqlmap.push(parsearSqlmap(url, sqlmapOutput));
+      const parsedSqlmap = parsearSqlmap(url, sqlmapOutput);
+      logVar(`sqlmapOutput.${url}`, sqlmapOutput);
+      logVar(`parsedSqlmap.${url}`, parsedSqlmap);
+      sqlmap.push(parsedSqlmap);
     } catch (error) {
       console.error(`Error en sqlmap para ${url}:`, error.message);
 
@@ -841,6 +919,7 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
         evidencia: null,
         resumen: []
       });
+      logVar(`sqlmapError.${url}`, error.message);
     }
   }
 
@@ -853,7 +932,10 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
           ['tools/sqlmap/sqlmap.py', '-u', url, '--crawl=2', '--batch', '--random-agent', '--level=1', '--risk=1', '--smart', '--disable-coloring'],
           { timeout: timeoutMs }
         );
-        sqlmap.push(parsearSqlmap(url, sqlmapOutput));
+        const parsedSqlmap = parsearSqlmap(url, sqlmapOutput);
+        logVar(`sqlmapOutput.${url}`, sqlmapOutput);
+        logVar(`parsedSqlmap.${url}`, parsedSqlmap);
+        sqlmap.push(parsedSqlmap);
       } catch (error) {
         sqlmap.push({
           url,
@@ -884,6 +966,8 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
       ? 'sqlmap no se ejecuto porque no se encontraron parametros'
       : null
   };
+  logVar('sqlmap', sqlmap);
+  logVar('toolResults.sqlmap', toolResults.sqlmap);
   progreso('sqlmap', toolResults.sqlmap.status || 'done', 'Sqlmap finalizado');
 
   progreso('trufflehog', 'running', 'Buscando secretos expuestos');
@@ -894,7 +978,9 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
     ],
     { maxJs: maxJsSecretScan, timeoutMs }
   );
+  logVar('trufflehogResult', trufflehogResult);
   toolResults.trufflehog = trufflehogResult;
+  logVar('toolResults.trufflehog', toolResults.trufflehog);
   progreso('trufflehog', trufflehogResult.status || 'done', 'Trufflehog finalizado');
 
   return {

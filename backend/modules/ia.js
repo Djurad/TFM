@@ -439,13 +439,29 @@ function normalizarComparacion(texto) {
     .trim();
 }
 
-async function enriquecerFindingIndividual(target, tool, finding) {
+async function enriquecerFindingIndividual(target, tool, finding, scanLogger = null) {
   for (let intento = 1; intento <= INTENTOS_ENRIQUECIMIENTO_IA; intento++) {
-    const respuesta = await generarJsonIA(
-      promptImpactoRecomendacionIndividual(target, tool, compactarFindingParaIA(finding))
-    );
+    const findingCompacto = compactarFindingParaIA(finding);
+    const prompt = promptImpactoRecomendacionIndividual(target, tool, findingCompacto);
+    if (scanLogger?.section) {
+      scanLogger.variable(`findingCompacto.${tool}.${finding.id}.intento${intento}`, findingCompacto);
+      scanLogger.variable(`prompt.${tool}.${finding.id}.intento${intento}`, prompt);
+    }
+
+    const respuesta = await generarJsonIA(prompt);
+    if (scanLogger?.section) {
+      scanLogger.variable(`respuestaIA.${tool}.${finding.id}.intento${intento}`, respuesta);
+    }
+
     const items = extraerItemsImpacto(respuesta);
+    if (scanLogger?.section) {
+      scanLogger.variable(`itemsIA.${tool}.${finding.id}.intento${intento}`, items);
+    }
+
     const enriquecido = aplicarImpactosIA([finding], items)[0];
+    if (scanLogger?.section) {
+      scanLogger.variable(`enriquecido.${tool}.${finding.id}.intento${intento}`, enriquecido);
+    }
 
     if (enriquecido.impact && enriquecido.recommendation) {
       return enriquecido;
@@ -455,7 +471,7 @@ async function enriquecerFindingIndividual(target, tool, finding) {
   return finding;
 }
 
-async function enriquecerFindingsIA(target, tool, findings) {
+async function enriquecerFindingsIA(target, tool, findings, scanLogger = null) {
   const base = normalizarFindings(findings, tool, target)
     .map(finding => ({
       ...finding,
@@ -465,13 +481,25 @@ async function enriquecerFindingsIA(target, tool, findings) {
 
   if (!base.length) return [];
 
+  if (scanLogger?.section) {
+    scanLogger.variable(`findingsOriginalesIA.${tool}`, findings);
+    scanLogger.variable(`baseIA.${tool}`, base);
+  }
+
   const enriquecidos = [];
 
   for (const finding of base) {
     try {
-      enriquecidos.push(await enriquecerFindingIndividual(target, tool, finding));
+      enriquecidos.push(await enriquecerFindingIndividual(target, tool, finding, scanLogger));
     } catch (error) {
       console.error(`IA no pudo completar ${tool}/${finding.id}:`, error.message);
+      if (scanLogger?.section) {
+        scanLogger.variable(`errorIA.${tool}.${finding.id}`, {
+          error: error.message,
+          stack: error.stack || null,
+          finding
+        });
+      }
       const fallback = fallbackTecnico(finding);
       enriquecidos.push({
         ...finding,
@@ -483,7 +511,12 @@ async function enriquecerFindingsIA(target, tool, findings) {
     }
   }
 
-  return normalizarFindings(enriquecidos, tool, target);
+  const normalizados = normalizarFindings(enriquecidos, tool, target);
+  if (scanLogger?.section) {
+    scanLogger.variable(`normalizadosIA.${tool}`, normalizados);
+  }
+
+  return normalizados;
 }
 
 async function generarSeccionInformeIA(target, tool, findings) {

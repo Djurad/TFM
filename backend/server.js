@@ -11,6 +11,7 @@ const { extraerFindingsDeterministas } = require('./modules/extractores');
 const { clasificarFindings } = require('./modules/clasificadorFindings');
 const { calcularRiskScore } = require('./modules/scoring');
 const { correlacionarFindings, normalizarUrl, origenYRuta, parametro } = require('./modules/correlacion');
+const { crearScanLogger } = require('./modules/scanLogger');
 
 const app = express();
 const PORT = 3000;
@@ -453,6 +454,7 @@ app.post('/analizar-stream', async (req, res) => {
   const enviar = payload => {
     res.write(`${JSON.stringify(payload)}\n`);
   };
+  let scanLogger = null;
 
   res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -466,22 +468,37 @@ app.post('/analizar-stream', async (req, res) => {
       return;
     }
 
+    scanLogger = crearScanLogger(entrada.trim());
+    scanLogger.variable('entrada', entrada.trim());
+
     const reconocimiento = await ejecutarReconocimiento(entrada.trim(), {
-      onProgress: progress => enviar({
-        type: 'progress',
-        ...progress,
-        at: new Date().toISOString()
-      })
+      scanLogger,
+      onProgress: progress => {
+        enviar({
+          type: 'progress',
+          ...progress,
+          at: new Date().toISOString()
+        });
+      }
     });
     const toolResults = reconocimiento.tool_results || {};
     const findings = [];
 
+    scanLogger.variable('reconocimiento', reconocimiento);
+    scanLogger.variable('toolResults', toolResults);
+
+    for (const [tool, result] of Object.entries(toolResults)) {
+      scanLogger.toolResult(tool, result);
+    }
+
     if (Object.keys(toolResults).length === 0) {
+      scanLogger.section('ERROR', 'El modulo de reconocimiento no devolvio resultados por herramienta.');
       enviar({ type: 'error', error: 'El modulo de reconocimiento no devolvio resultados por herramienta.' });
       return;
     }
 
     for (const [tool, result] of Object.entries(toolResults)) {
+      scanLogger.progress(tool, 'running', `Clasificando hallazgos de ${tool}`);
       enviar({ type: 'progress', tool, status: 'running', message: `Clasificando hallazgos de ${tool}` });
       const findingsDeterministas = clasificarFindings(
         extraerFindingsDeterministas(tool, result, reconocimiento.target)
@@ -499,6 +516,11 @@ app.post('/analizar-stream', async (req, res) => {
         no_enviados_ia: result.metrics?.no_enviados_ia ?? (findingsDeterministas.length - findingsParaIA.length)
       };
 
+      scanLogger.variable(`findingsDeterministas.${tool}`, findingsDeterministas);
+      scanLogger.variable(`descartadosInfo.${tool}`, descartadosInfo);
+      scanLogger.variable(`findingsParaIA.${tool}`, findingsParaIA);
+      scanLogger.variable(`result.metrics.${tool}`, result.metrics);
+
       if (tool === 'katana') {
         const superficieUtil = findingsDeterministas.filter(f => f.type === 'surface').length;
         result.metrics.superficie_util = superficieUtil;
@@ -511,19 +533,33 @@ app.post('/analizar-stream', async (req, res) => {
 
       if (findingsParaIA.length > 0) {
         try {
+          scanLogger.progress(`ia/${tool}`, 'running', `IA explicando hallazgos de ${tool}`, {
+            findings: findingsParaIA.length
+          });
+          scanLogger.variable(`findingsParaIA.${tool}`, findingsParaIA);
           enviar({ type: 'progress', tool: `ia/${tool}`, status: 'running', message: `IA explicando hallazgos de ${tool}` });
           const findingsIA = await enriquecerFindingsIA(
             reconocimiento.target,
             tool,
-            findingsParaIA
+            findingsParaIA,
+            scanLogger
           );
+          scanLogger.variable(`findingsIA.${tool}`, findingsIA);
 
           if (findingsIA.length > 0) {
             const enriquecidos = new Map(clasificarFindings(findingsIA).map(f => [f.id, f]));
             result.findings = result.findings.map(f => enriquecidos.get(f.id) || f);
           }
+          scanLogger.variable(`result.findings.${tool}`, result.findings);
+          scanLogger.progress(`ia/${tool}`, 'done', `IA finalizada para ${tool}`);
           enviar({ type: 'progress', tool: `ia/${tool}`, status: 'done', message: `IA finalizada para ${tool}` });
         } catch (error) {
+          scanLogger.progress(`ia/${tool}`, 'error', error.message);
+          scanLogger.section(`ERROR IA: ${tool}`, {
+            error: error.message,
+            stack: error.stack || null,
+            findings_enviados: findingsParaIA
+          });
           enviar({ type: 'progress', tool: `ia/${tool}`, status: 'error', message: error.message });
           result.error = [
             result.error,
@@ -534,31 +570,49 @@ app.post('/analizar-stream', async (req, res) => {
               ? aplicarFallbackIa([f])[0]
               : f
           );
+          scanLogger.variable(`result.findings.${tool}`, result.findings);
         }
+      }
+
+      if (findingsParaIA.length === 0) {
+        scanLogger.variable(`result.findings.${tool}`, result.findings);
       }
 
       findings.push(...(result.findings || []));
     }
 
+    scanLogger.progress('correlacion', 'running', 'Correlacionando hallazgos');
     enviar({ type: 'progress', tool: 'correlacion', status: 'running', message: 'Correlacionando hallazgos' });
+    scanLogger.variable('findings', findings);
     const findingsDeduplicadosBase = deduplicarFindings(findings);
+    scanLogger.variable('findingsDeduplicadosBase', findingsDeduplicadosBase);
     const correlacion = correlacionarFindings(findingsDeduplicadosBase, toolResults);
+    scanLogger.variable('correlacion', correlacion);
     const findingsDeduplicados = correlacion.findings;
     const grupos = agruparFindings(findingsDeduplicados);
+    scanLogger.variable('findingsDeduplicados', findingsDeduplicados);
+    scanLogger.variable('grupos', grupos);
     const findingsInforme = [
       ...grupos.confirmadas,
       ...grupos.posibles
     ];
+    scanLogger.variable('findingsInforme', findingsInforme);
     const summaryUi = construirResumenUI(grupos);
     const toolCounters = resumenHerramientas(reconocimiento, toolResults, findingsDeduplicados);
     const risk = calcularRiskScore(findingsDeduplicados);
+    scanLogger.variable('summaryUi', summaryUi);
+    scanLogger.variable('toolCounters', toolCounters);
+    scanLogger.variable('risk', risk);
     const serializedToolResults = Object.fromEntries(
       Object.entries(toolResults).map(([tool, result]) => [
         tool,
         serializarToolResult(result)
       ])
     );
+    scanLogger.variable('serializedToolResults', serializedToolResults);
     const pipelineTimeline = construirPipelineTimeline(serializedToolResults, toolCounters, correlacion.correlations, risk);
+    scanLogger.variable('pipelineTimeline', pipelineTimeline);
+
 
     const respuesta = {
       target: reconocimiento.target,
@@ -582,9 +636,13 @@ app.post('/analizar-stream', async (req, res) => {
       summary: resumenSeveridad(findingsInforme)
     };
 
+    scanLogger.variable('respuesta', respuesta);
+    scanLogger.progress('analisis', 'done', 'Analisis completado');
+    scanLogger.done();
     enviar({ type: 'progress', tool: 'analisis', status: 'done', message: 'Analisis completado' });
     enviar({ type: 'result', data: respuesta });
   } catch (error) {
+    if (scanLogger) scanLogger.error(error);
     enviar({ type: 'error', error: error.message });
   } finally {
     res.end();

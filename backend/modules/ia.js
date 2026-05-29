@@ -11,7 +11,7 @@ const {
 
 const MODEL = process.env.OLLAMA_MODEL || 'llama3';
 const OLLAMA_REINTENTOS = 3;
-const INTENTOS_ENRIQUECIMIENTO_IA = Number(process.env.IA_INTENTOS_ENRIQUECIMIENTO || 3);
+const INTENTOS_ENRIQUECIMIENTO_IA = Number(process.env.IA_INTENTOS_ENRIQUECIMIENTO || 2);
 const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS || 0);
 
 function construirOllamaUrl() {
@@ -442,7 +442,14 @@ function normalizarComparacion(texto) {
 async function enriquecerFindingIndividual(target, tool, finding, scanLogger = null) {
   for (let intento = 1; intento <= INTENTOS_ENRIQUECIMIENTO_IA; intento++) {
     const findingCompacto = compactarFindingParaIA(finding);
-    const prompt = promptImpactoRecomendacionIndividual(target, tool, findingCompacto);
+    const promptBase = promptImpactoRecomendacionIndividual(target, tool, findingCompacto);
+    const prompt = intento === 1
+      ? promptBase
+      : `${promptBase}
+
+La respuesta anterior no produjo campos validos de impact y recommendation.
+Corrige el formato. Devuelve SOLO JSON valido, sin Markdown ni texto adicional.
+Los campos impact y recommendation son obligatorios y no pueden estar vacios.`;
     if (scanLogger?.section) {
       scanLogger.variable(`findingCompacto.${tool}.${finding.id}.intento${intento}`, findingCompacto);
       scanLogger.variable(`prompt.${tool}.${finding.id}.intento${intento}`, prompt);

@@ -4,13 +4,18 @@ const btnNuevoAnalisis = document.getElementById('btnNuevoAnalisis');
 const promptInput = document.getElementById('prompt');
 const estado = document.getElementById('estado');
 const resultados = document.getElementById('resultados');
-const herramientas = document.getElementById('herramientas');
+const pipelineProgress = document.getElementById('pipelineProgress');
+const pipelineProgressPercent = document.getElementById('pipelineProgressPercent');
+const pipelineProgressFill = document.getElementById('pipelineProgressFill');
+const pipelineProgressTrack = document.querySelector('.pipeline-progress-track');
 
 let ultimoAnalisis = null;
 let filtroCategoria = 'todos';
 let filtroSeveridad = 'todos';
 let progressEvents = [];
 let livePipeline = [];
+let pasosCompletados = new Set();
+let progresoActual = 0;
 
 const pipelineOrder = [
   'subfinder',
@@ -30,9 +35,12 @@ const pipelineOrder = [
   'sqlmap',
   'trufflehog',
   'correlacion',
-  'score final',
-  'informe'
+  'score final'
 ];
+
+const IA_PHASE = 'analisis ia';
+const pipelineVisualOrder = [...pipelineOrder, IA_PHASE];
+const TOTAL_PASOS = pipelineVisualOrder.length;
 
 const hardeningTypes = ['missing_security_header', 'insecure_cookie', 'missing_https_redirect', 'tls_certificate_issue'];
 const gfTypes = ['gf-candidate'];
@@ -50,8 +58,54 @@ function setEstado(texto, tipo = '') {
   estado.className = tipo ? `status ${tipo}` : 'status';
 }
 
+function slugHerramienta(nombreHerramienta = '') {
+  return String(nombreHerramienta || '')
+    .toLowerCase()
+    .replace(/\s+/g, '-')
+    .replace(/[^a-z0-9_-]/g, '');
+}
+
+function actualizarProgreso(completadas, total = TOTAL_PASOS) {
+  const totalSeguro = Math.max(Number(total) || 1, 1);
+  const completadasSeguras = Math.min(Math.max(Number(completadas) || 0, 0), totalSeguro);
+  const porcentaje = Math.round((completadasSeguras / totalSeguro) * 100);
+
+  if (porcentaje < progresoActual) return;
+  progresoActual = porcentaje;
+
+  if (pipelineProgress && (completadasSeguras > 0 || porcentaje === 100)) {
+    pipelineProgress.classList.remove('is-indeterminate');
+  }
+  if (pipelineProgressPercent) pipelineProgressPercent.textContent = `${porcentaje}%`;
+  if (pipelineProgressFill) pipelineProgressFill.style.width = `${porcentaje}%`;
+  if (pipelineProgressTrack) pipelineProgressTrack.setAttribute('aria-valuenow', String(porcentaje));
+}
+
+function activarProgresoIndeterminado() {
+  if (pipelineProgress) pipelineProgress.classList.add('is-indeterminate');
+  if (pipelineProgressPercent) pipelineProgressPercent.textContent = '0%';
+  if (pipelineProgressFill) pipelineProgressFill.style.width = '0%';
+  if (pipelineProgressTrack) pipelineProgressTrack.setAttribute('aria-valuenow', '0');
+}
+
+function esEstadoFinal(status = '') {
+  return ['success', 'done', 'completed', 'ok', 'ready', 'error', 'fail', 'failed', 'partial', 'timeout', 'skipped', 'skip'].includes(String(status || '').toLowerCase());
+}
+
+function completarPaso(nombrePaso) {
+  if (!nombrePaso || pasosCompletados.has(nombrePaso)) return;
+  pasosCompletados.add(nombrePaso);
+  actualizarProgreso(pasosCompletados.size, TOTAL_PASOS);
+}
+
+function sincronizarProgresoDesdePipeline() {
+  livePipeline
+    .filter(item => pipelineOrder.includes(item.tool) && esEstadoFinal(item.status))
+    .forEach(item => completarPaso(item.tool));
+}
+
 function crearPipelineInicial() {
-  return pipelineOrder.map(tool => ({
+  return pipelineVisualOrder.map(tool => ({
     tool,
     status: 'pending',
     detail: 'pendiente',
@@ -64,7 +118,7 @@ function normalizarToolTimeline(tool = '') {
   const raw = String(tool || '');
   if (raw === 'score') return 'score final';
   if (raw === 'analisis') return 'subfinder';
-  if (raw.startsWith('ia/')) return raw.replace(/^ia\//, '');
+  if (raw.startsWith('ia/')) return IA_PHASE;
   return raw;
 }
 
@@ -76,6 +130,17 @@ function detalleProgreso(evento = {}) {
 function actualizarPipelineVivo(evento = {}) {
   const tool = normalizarToolTimeline(evento.tool);
   if (!livePipeline.length) livePipeline = crearPipelineInicial();
+
+  if (tool === IA_PHASE) {
+    livePipeline = livePipeline.map(item => item.tool === IA_PHASE
+      ? { ...item, status: evento.status || 'running', detail: detalleProgreso(evento) }
+      : item
+    );
+    if (esEstadoFinal(evento.status)) completarPaso(IA_PHASE);
+    setEstado(evento.message || '[*] analisis IA en curso...', esEstadoFinal(evento.status) ? 'success' : 'loading');
+    resultados.innerHTML = renderPipelineTimeline(livePipeline);
+    return;
+  }
 
   const index = livePipeline.findIndex(item => item.tool === tool);
   if (index < 0) return;
@@ -95,6 +160,7 @@ function actualizarPipelineVivo(evento = {}) {
     return item;
   });
 
+  sincronizarProgresoDesdePipeline();
   resultados.innerHTML = renderPipelineTimeline(livePipeline);
 }
 
@@ -167,8 +233,7 @@ function statusCorto(status = '') {
   const lower = String(status || '').toLowerCase();
   if (['success', 'done', 'completed', 'ok', 'ready'].includes(lower)) return 'OK';
   if (['error', 'fail', 'failed'].includes(lower)) return 'FAIL';
-  if (['skipped', 'skip'].includes(lower)) return 'SKIP';
-  if (['partial', 'timeout', 'warning'].includes(lower)) return 'WARN';
+  if (['skipped', 'skip', 'partial', 'timeout', 'warning'].includes(lower)) return 'FAIL';
   if (['pending', 'wait'].includes(lower)) return '..';
   return 'RUN';
 }
@@ -216,47 +281,6 @@ function obtenerDetalleHerramienta(tool, result, counter = {}) {
   if (tool === 'nuclei') return `${counter.vulnerabilidades_reales || 0} vulnerabilidades`;
   if (tool === 'sqlmap') return counter.no_ejecutada ? 'no ejecutada' : `${counter.confirmadas || 0} confirmadas / ${counter.posibles || 0} posibles`;
   return `${(result.findings || []).length} hallazgos`;
-}
-
-function renderHerramientas(toolResults = {}) {
-  herramientas.innerHTML = '';
-  const counters = ultimoAnalisis?.tool_counters || {};
-  const warnings = [];
-
-  const header = document.createElement('div');
-  header.className = 'tool-row tool-header';
-  header.innerHTML = '<strong>HERRAMIENTA</strong><span>RESULTADO</span><span>DETALLES</span><span>TIEMPO</span>';
-  herramientas.appendChild(header);
-
-  Object.entries(toolResults).forEach(([tool, result]) => {
-    const detalle = obtenerDetalleHerramienta(tool, result, counters[tool]);
-    const status = estadoHerramienta(result.status);
-    const item = document.createElement('div');
-    item.className = 'tool-row';
-    item.innerHTML = `
-      <strong>${escaparHtml(tool)}</strong>
-      <span class="tool-status ${status.className}">${escaparHtml(status.label)}</span>
-      <span>${escaparHtml(detalle)}</span>
-      <span class="terminal-subtle">--</span>
-      ${result.error ? `<small>[!] ${escaparHtml(result.error)}</small>` : ''}
-      ${result.warning ? `<small>[i] ${escaparHtml(result.warning)}</small>` : ''}
-    `;
-    if (result.error || result.warning) warnings.push({ tool, message: result.error || result.warning });
-    herramientas.appendChild(item);
-  });
-
-  if (warnings.length) {
-    const log = document.createElement('div');
-    log.className = 'terminal-card';
-    log.style.gridColumn = '1 / -1';
-    log.innerHTML = `
-      <h2>LOGS / WARNINGS</h2>
-      <ul class="compact-list">
-        ${warnings.slice(0, 8).map(item => `<li><span>[i] ${escaparHtml(item.tool)}: ${escaparHtml(item.message)}</span><span>--</span></li>`).join('')}
-      </ul>
-    `;
-    herramientas.appendChild(log);
-  }
 }
 
 function categoriaFinding(finding = {}) {
@@ -400,41 +424,83 @@ function renderFiltros() {
   `;
 }
 
-function renderHallazgoPriorizado(finding = {}, index = 0) {
-  const severity = String(finding.severity || 'info').toLowerCase();
+function textoFinding(finding = {}) {
+  return [
+    finding.title,
+    finding.description,
+    finding.evidence,
+    finding.type,
+    finding.tool,
+    finding.impact
+  ].filter(Boolean).join(' ').toLowerCase();
+}
+
+function nivelVisualFinding(finding = {}) {
+  const severity = String(finding.severity || '').toLowerCase();
   const categoria = categoriaFinding(finding);
-  const activo = finding.affected_url || finding.affected_asset || ultimoAnalisis?.target || '-';
-  const cwe = finding.cwe ? ` | ${finding.cwe}` : '';
+  const texto = textoFinding(finding);
+
+  if (['critical'].includes(severity) || (finding.confidence === 'high' && categoria === 'EXPLOTABLE') || /\b(rce|sql injection|sqlmap|xss|dalfox|nuclei|secret|credential|trufflehog)\b/.test(texto)) {
+    return { key: 'critical', label: 'CRITICA', icon: 'fa-triangle-exclamation' };
+  }
+  if (['high'].includes(severity) || categoria === 'POSIBLE' || /\b(posible|explotable|redirect|ssrf|sqli)\b/.test(texto)) {
+    return { key: 'high', label: 'ALTA', icon: 'fa-bug' };
+  }
+  if (['medium'].includes(severity) || categoria === 'GF' || /\b(gf|candidate|candidato)\b/.test(texto)) {
+    return { key: 'medium', label: 'MEDIA', icon: 'fa-eye' };
+  }
+  if (['low'].includes(severity) || ['SUPERFICIE', 'HARDENING'].includes(categoria) || /\b(missing header|header|cookie|tls|https|robots|sitemap|surface|hardening)\b/.test(texto)) {
+    return { key: 'low', label: 'BAJA', icon: 'fa-shield-halved' };
+  }
+  return { key: 'info', label: 'INFO', icon: 'fa-circle-info' };
+}
+
+function grupoVisualFinding(finding = {}) {
+  const categoria = categoriaFinding(finding);
+  if (categoria === 'EXPLOTABLE') return 'confirmadas';
+  if (categoria === 'POSIBLE' || categoria === 'GF') return 'posibles';
+  if (categoria === 'SUPERFICIE' || finding.type === 'surface') return 'superficie';
+  if (categoria === 'HARDENING') return 'hardening';
+  return 'info';
+}
+
+function descripcionCorta(finding = {}) {
+  return fallback(finding.description || finding.impact || buildAiReason(finding), 'Sin descripcion disponible.');
+}
+
+function evidenciaFinding(finding = {}) {
+  return finding.evidence || finding.raw_reference || finding.affected_url || finding.affected_asset || '';
+}
+
+function renderFindingCard(finding = {}) {
+  const nivel = nivelVisualFinding(finding);
+  const categoria = categoriaFinding(finding);
   return `
-    <details class="priority-row severity-${escaparHtml(severity)}" ${index === 0 ? 'open' : ''}>
+    <article class="finding-card finding-${escaparHtml(nivel.key)}">
+      <header>
+        <span class="finding-severity"><i class="fas ${escaparHtml(nivel.icon)}"></i> ${escaparHtml(nivel.label)}</span>
+        <span class="terminal-badge">[${escaparHtml(fallback(finding.tool, 'tool'))}]</span>
+      </header>
+      <h3>${escaparHtml(fallback(finding.title, 'Hallazgo sin titulo'))}</h3>
+      <p>${escaparHtml(descripcionCorta(finding))}</p>
+      <div class="finding-meta">
+        <span><i class="fas fa-layer-group"></i> ${escaparHtml(categoria)}</span>
+        <span><i class="fas fa-crosshairs"></i> ${escaparHtml(fallback(finding.affected_url || finding.affected_asset || ultimoAnalisis?.target, '-'))}</span>
+      </div>
+      ${evidenciaFinding(finding) ? `<pre class="finding-evidence">${escaparHtml(evidenciaFinding(finding))}</pre>` : ''}
+    </article>
+  `;
+}
+
+function renderGrupoHallazgos(titulo, icono, findings = [], abierto = false) {
+  return `
+    <details class="finding-group" ${abierto ? 'open' : ''}>
       <summary>
-        <span class="terminal-badge severity-${escaparHtml(severity)}">[${escaparHtml(severityLabels[severity] || severity.toUpperCase())}]</span>
-        <span class="terminal-badge category-${escaparHtml(categoria.toLowerCase())}">[${escaparHtml(categoria)}]</span>
-        <span class="terminal-badge">[${escaparHtml(fallback(finding.type, 'tipo'))}]</span>
-        <span class="priority-title">${escaparHtml(fallback(finding.title, 'Hallazgo sin titulo'))}</span>
-        <span class="priority-tool">${escaparHtml(fallback(finding.tool, 'tool'))}</span>
+        <span><i class="fas ${escaparHtml(icono)}"></i> ${escaparHtml(titulo)}</span>
+        <strong>${escaparHtml(findings.length)}</strong>
       </summary>
-      <div class="priority-body">
-        <p class="ai-reason">${escaparHtml(buildAiReason(finding))}</p>
-        <div class="priority-meta">Tool: ${escaparHtml(fallback(finding.tool, '-'))} | Confianza: ${escaparHtml(fallback(finding.confidence, 'low'))}${escaparHtml(cwe)}</div>
-        <div class="mono-box">Activo: ${escaparHtml(activo)}</div>
-        ${Array.isArray(finding.correlation_notes) && finding.correlation_notes.length ? `
-          <div>
-            <div class="priority-meta">RELACIONADO CON:</div>
-            <ul class="compact-list relation-list">
-              ${finding.correlation_notes.map(note => `<li><span>${escaparHtml(note)}</span><span>corr</span></li>`).join('')}
-            </ul>
-          </div>
-        ` : ''}
-        <dl>
-          <dt>Descripcion</dt><dd>${escaparHtml(fallback(finding.description, 'No disponible'))}</dd>
-          <dt>Evidencia</dt><dd>${escaparHtml(fallback(finding.evidence, 'Sin evidencia detallada'))}</dd>
-          <dt>Impacto</dt><dd>${escaparHtml(fallback(finding.impact, '-'))}</dd>
-          <dt>Recomendacion</dt><dd>${escaparHtml(fallback(finding.recommendation, '-'))}</dd>
-          ${finding.payload ? `<dt>Payload</dt><dd>${escaparHtml(finding.payload)}</dd>` : ''}
-          ${finding.parametro || finding.parameter || finding.param ? `<dt>Parametro</dt><dd>${escaparHtml(finding.parametro || finding.parameter || finding.param)}</dd>` : ''}
-          ${finding.raw_reference ? `<dt>Raw</dt><dd>${escaparHtml(finding.raw_reference)}</dd>` : ''}
-        </dl>
+      <div class="finding-grid">
+        ${findings.length ? findings.map(renderFindingCard).join('') : '<p class="empty">Sin hallazgos en esta categoria.</p>'}
       </div>
     </details>
   `;
@@ -442,6 +508,18 @@ function renderHallazgoPriorizado(finding = {}, index = 0) {
 
 function renderListaPriorizada(findings = []) {
   const filtrados = aplicarFiltros(deduplicarFindingsPriorizados(findings));
+  const grupos = {
+    confirmadas: [],
+    posibles: [],
+    superficie: [],
+    hardening: [],
+    info: []
+  };
+
+  filtrados.forEach(finding => {
+    grupos[grupoVisualFinding(finding)].push(finding);
+  });
+
   return `
     <section class="terminal-card prioritized-section">
       <div class="group-header">
@@ -449,8 +527,12 @@ function renderListaPriorizada(findings = []) {
         <span>${escaparHtml(filtrados.length)}</span>
       </div>
       ${renderFiltros()}
-      <div class="priority-list">
-        ${filtrados.length ? filtrados.map(renderHallazgoPriorizado).join('') : '<p class="empty">Sin hallazgos para los filtros seleccionados.</p>'}
+      <div class="finding-groups">
+        ${renderGrupoHallazgos('Vulnerabilidades confirmadas', 'fa-triangle-exclamation', grupos.confirmadas, true)}
+        ${renderGrupoHallazgos('Posibles vectores', 'fa-bug', grupos.posibles, true)}
+        ${renderGrupoHallazgos('Superficie expuesta', 'fa-eye', grupos.superficie)}
+        ${renderGrupoHallazgos('Hardening / Configuracion', 'fa-shield-halved', grupos.hardening)}
+        ${renderGrupoHallazgos('Informativo', 'fa-circle-info', grupos.info)}
       </div>
     </section>
   `;
@@ -493,16 +575,17 @@ function statusClaseTimeline(status = '') {
 
 function renderPipelineTimeline(items = []) {
   if (!items.length) return '';
+  const visibles = items.filter(item => pipelineVisualOrder.includes(item.tool));
   return `
     <section class="terminal-card pipeline-card">
       <div class="group-header">
         <h2>PIPELINE DE EJECUCION</h2>
-        <span>${escaparHtml(items.length)}</span>
+        <span>${escaparHtml(visibles.length)}</span>
       </div>
       <div class="pipeline-timeline">
-        ${items.map(item => `
-          <div class="pipeline-node ${statusClaseTimeline(item.status)} ${item.important ? 'timeline-important' : ''}">
-            <span class="terminal-badge">[${escaparHtml(statusCorto(item.status))}]</span>
+        ${visibles.map(item => `
+          <div id="node-${escaparHtml(slugHerramienta(item.tool))}" class="pipeline-node ${statusClaseTimeline(item.status)} ${item.important ? 'timeline-important' : ''}">
+            <span class="terminal-badge ${statusClaseTimeline(item.status)}">[${escaparHtml(statusCorto(item.status))}]</span>
             <strong>${escaparHtml(item.tool)}</strong>
             <span>${escaparHtml(item.detail || '--')}</span>
             <small>${item.duration_ms ? `${escaparHtml(item.duration_ms)} ms` : '--'}</small>
@@ -560,7 +643,7 @@ function renderFindings(findings = [], groups = null) {
 
   resultados.innerHTML = `
     ${renderScore(data)}
-    ${renderPipelineTimeline(data.pipeline_timeline || [])}
+    ${renderPipelineTimeline(livePipeline.length ? livePipeline : (data.pipeline_timeline || []))}
     ${renderCorrelaciones(data.correlations || [])}
     ${renderListaPriorizada(allFindings)}
     ${notices.map(n => `<p class="notice">${escaparHtml(n)}</p>`).join('')}
@@ -588,8 +671,10 @@ btnAnalizar.addEventListener('click', async () => {
   filtroSeveridad = 'todos';
   progressEvents = [];
   livePipeline = crearPipelineInicial();
+  pasosCompletados = new Set();
+  progresoActual = 0;
   btnGenerarInforme.disabled = true;
-  herramientas.innerHTML = '';
+  activarProgresoIndeterminado();
   resultados.innerHTML = renderPipelineTimeline(livePipeline);
   renderProgreso({ tool: 'analisis', status: 'running', message: `Preparando analisis para ${prompt}` });
 
@@ -608,12 +693,25 @@ btnAnalizar.addEventListener('click', async () => {
     const data = await leerAnalisisStream(response);
 
     ultimoAnalisis = data;
-    const grupos = normalizarGrupos(data);
+    const timelineFinal = Array.isArray(data.pipeline_timeline) ? data.pipeline_timeline : [];
+    livePipeline = pipelineVisualOrder.map(tool => {
+      const fromBackend = timelineFinal.find(item => item.tool === tool);
+      const fromLive = livePipeline.find(item => item.tool === tool);
+      const base = fromBackend || fromLive || { tool, detail: 'completado', duration_ms: null, important: false };
+      return {
+        ...base,
+        tool,
+        status: esEstadoFinal(base.status) ? base.status : 'success',
+        detail: tool === IA_PHASE ? 'analisis completado' : (base.detail === 'pendiente' ? 'completado' : base.detail)
+      };
+    });
+    pipelineOrder.forEach(completarPaso);
+    completarPaso(IA_PHASE);
     renderFindings(data.findings || [], data.groups || null);
-    renderHerramientas(data.tool_results || {});
     btnGenerarInforme.disabled = false;
     setEstado(`[*] analisis finalizado\n[+] objetivo: ${data.target}`, 'success');
   } catch (error) {
+    if (pipelineProgress) pipelineProgress.classList.remove('is-indeterminate');
     setEstado(`[!] error: ${error.message}`, 'error');
   }
 });
@@ -673,10 +771,13 @@ if (btnNuevoAnalisis) {
     filtroCategoria = 'todos';
     filtroSeveridad = 'todos';
     progressEvents = [];
+    livePipeline = [];
+    pasosCompletados = new Set();
+    progresoActual = 0;
     promptInput.value = '';
     btnGenerarInforme.disabled = true;
-    herramientas.innerHTML = '';
     resultados.innerHTML = '';
+    actualizarProgreso(0, TOTAL_PASOS);
     setEstado('');
     promptInput.focus();
   });

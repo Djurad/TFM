@@ -159,19 +159,34 @@ function correlacionarFindings(findings = [], toolResults = {}) {
     addNota(hsts, correlation.description, correlation.title);
   }
 
-  katana
-    .filter(f => /swagger|openapi/i.test(`${f.title} ${f.affected_url} ${f.evidence}`))
-    .forEach(swagger => {
-      const correlation = crearRelacion({
-        severity: 'info',
-        title: 'Swagger expone superficie API',
-        chain: ['katana'],
-        description: 'Swagger expone superficie util para revision manual de endpoints API.',
-        findings: [swagger]
-      });
-      correlations.push(correlation);
-      addNota(swagger, correlation.description, correlation.title);
+  const swaggerFindings = katana
+    .filter(f => /swagger|openapi/i.test(`${f.title} ${f.affected_url} ${f.evidence}`));
+
+  if (swaggerFindings.length) {
+    const recursos = Array.from(new Set(swaggerFindings
+      .map(f => {
+        try {
+          const parsed = new URL(f.affected_url || f.raw_reference || '');
+          return parsed.pathname.replace(/^\//, '') || parsed.hostname;
+        } catch {
+          return f.affected_url || f.raw_reference || f.title;
+        }
+      })
+      .filter(Boolean)))
+      .slice(0, 6);
+    const description = swaggerFindings.length === 1
+      ? 'Swagger/OpenAPI expone superficie util para revision manual de endpoints API.'
+      : `Se detectaron ${swaggerFindings.length} recursos Swagger/OpenAPI relevantes: ${recursos.join(', ')}.`;
+    const correlation = crearRelacion({
+      severity: 'info',
+      title: 'Swagger/OpenAPI expone superficie API',
+      chain: ['katana'],
+      description,
+      findings: swaggerFindings
     });
+    correlations.push(correlation);
+    swaggerFindings.forEach(swagger => addNota(swagger, correlation.description, correlation.title));
+  }
 
   ports
     .filter(f => [8080, 8443, 8000, 3000, 5000].includes(Number(f.port)))
@@ -189,7 +204,11 @@ function correlacionarFindings(findings = [], toolResults = {}) {
 
   const vistos = new Set();
   const dedup = correlations.filter(correlation => {
-    const key = `${correlation.title}|${correlation.related_ids.join(',')}`;
+    const key = [
+      correlation.title,
+      (correlation.chain || []).join('>'),
+      correlation.related_ids.join(',')
+    ].join('|').toLowerCase();
     if (vistos.has(key)) return false;
     vistos.add(key);
     return true;

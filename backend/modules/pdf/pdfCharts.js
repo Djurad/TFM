@@ -45,14 +45,16 @@ function drawHorizontalChart(doc, x, y, width, items = [], options = {}) {
     const value = Number(item.value || 0);
     const fillWidth = Math.max(value > 0 ? 2 : 0, Math.round((value / max) * barWidth));
     const color = options.colors?.[index % options.colors.length] || COLORS.low;
+    const label = String(item.label || '');
+    const shortLabel = label.length > 15 ? `${label.slice(0, 12)}...` : label;
 
     doc.font(FONTS.regular).fontSize(7.5).fillColor(COLORS.muted);
-    fixedText(doc, String(item.label), x, cursorY - 1, { width: 78 });
+    fixedText(doc, shortLabel, x, cursorY - 1, { width: 78 });
     doc.roundedRect(x + 84, cursorY, barWidth, 9, 4).fill(COLORS.borderSoft);
     if (fillWidth > 0) doc.roundedRect(x + 84, cursorY, fillWidth, 9, 4).fill(color);
     doc.font(FONTS.bold).fontSize(7.5).fillColor(COLORS.text);
     fixedText(doc, String(value), x + 90 + barWidth, cursorY - 1, { width: 32, align: 'right' });
-    cursorY += 16;
+    cursorY += 18;
   });
 
   if (!rows.length) {

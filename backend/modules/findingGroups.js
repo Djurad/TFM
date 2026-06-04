@@ -173,8 +173,23 @@ function normalizeGfCandidate(finding) {
     reportable: false,
     requiresManualValidation: true,
     isFalsePositiveLikely: false,
-    falsePositiveReason: 'GF prioriza candidatos por patron; no confirma explotabilidad.'
+    falsePositiveReason: 'GF prioriza candidatos por patron; no confirma explotabilidad.',
+    impact: 'Este candidato requiere validacion manual. GF solo indica que el patron de parametros coincide con vectores habituales. No se ha confirmado explotabilidad.',
+    recommendation: 'Validar manualmente antes de tratarlo como vulnerabilidad. Confirmar con pruebas especificas o herramientas como Dalfox, SQLMap o Nuclei segun el vector.'
   };
+}
+
+function hasSqlmapEvidence(finding = {}) {
+  const evidence = String(finding.evidence || finding.evidencia || '').trim();
+  const weakEvidence = /possible_sqli, pero no identifico payload|possible_sqli, pero no identificó payload/i.test(evidence);
+  return Boolean(
+    finding.payload ||
+    finding.parametro ||
+    finding.parameter ||
+    finding.param ||
+    finding.dbms ||
+    (evidence && !weakEvidence)
+  );
 }
 
 function normalizeSqlmap(finding) {
@@ -198,12 +213,18 @@ function normalizeSqlmap(finding) {
   }
 
   if (sourceStatus === 'possible_sqli') {
+    const strongEvidence = hasSqlmapEvidence(finding);
+    const weakEvidenceMessage = 'SQLMap devolvio estado possible_sqli, pero no identifico payload, parametro vulnerable, DBMS ni evidencia detallada.';
+
     return {
       ...finding,
       type: 'possible_vulnerability',
       category: 'vulnerability',
-      severity: 'high',
-      confidence: 'medium',
+      title: strongEvidence
+        ? (finding.title || 'Posible SQL Injection detectada por SQLMap')
+        : 'Posible SQL Injection no concluyente detectada por SQLMap',
+      severity: strongEvidence ? 'high' : 'medium',
+      confidence: strongEvidence ? 'medium' : 'low',
       isVulnerability: true,
       confirmed: false,
       reportable: true,
@@ -211,7 +232,14 @@ function normalizeSqlmap(finding) {
       isFalsePositiveLikely: false,
       falsePositiveReason: '',
       source_status: sourceStatus,
-      status: 'requires_manual_validation'
+      status: 'requires_manual_validation',
+      evidence: strongEvidence ? finding.evidence : weakEvidenceMessage,
+      impact: strongEvidence
+        ? finding.impact
+        : 'El resultado no es concluyente. Puede indicar un comportamiento que requiere revision, pero no hay evidencia suficiente para afirmar explotabilidad.',
+      recommendation: strongEvidence
+        ? finding.recommendation
+        : 'Validar manualmente el endpoint y sus parametros. Revisar consultas parametrizadas/ORM seguro si se confirma inyeccion SQL.'
     };
   }
 

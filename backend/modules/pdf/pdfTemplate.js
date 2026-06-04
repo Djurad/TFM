@@ -171,13 +171,23 @@ function drawExecutiveSummary(doc, report) {
     `Tambien se han separado ${report.groups.gfCandidates.length} candidatos GF, ${report.groups.hardening.length} hallazgos de hardening y ${report.groups.attackSurface.length} elementos de superficie de ataque para mantener trazabilidad sin exagerar la criticidad.`
   ].join('\n\n');
 
-  panel(doc, left, doc.y, PAGE.contentWidth, 154, { fill: COLORS.panel });
-  doc.font(FONTS.regular).fontSize(10).fillColor(COLORS.text).text(paragraph, left + 18, doc.y + 18, {
+  doc.font(FONTS.regular).fontSize(9.4);
+  const paragraphHeight = doc.heightOfString(paragraph, {
     width: PAGE.contentWidth - 36,
-    lineGap: 4,
+    lineGap: 3,
     align: 'justify'
   });
-  doc.y += 172;
+  const panelHeight = Math.max(154, paragraphHeight + 40);
+  ensureSpace(doc, panelHeight + 18);
+
+  const y = doc.y;
+  panel(doc, left, y, PAGE.contentWidth, panelHeight, { fill: COLORS.panel });
+  doc.font(FONTS.regular).fontSize(9.4).fillColor(COLORS.text).text(paragraph, left + 18, y + 18, {
+    width: PAGE.contentWidth - 36,
+    lineGap: 3,
+    align: 'justify'
+  });
+  doc.y = y + panelHeight + 18;
 }
 
 function drawMetrics(doc, report) {
@@ -208,59 +218,35 @@ function drawMetrics(doc, report) {
 }
 
 function drawCharts(doc, report) {
-  ensureSpace(doc, 370);
+  ensureSpace(doc, 410);
   sectionTitle(doc, 'Graficas', 'Visualizacion');
-  ensureSpace(doc, 300);
+  ensureSpace(doc, 340);
   const { left } = pageBounds(doc);
   const gap = 12;
   const half = (PAGE.contentWidth - gap) / 2;
   const y = doc.y;
+  const chartPanelHeight = 216;
 
-  panel(doc, left, y, half, 172, { fill: COLORS.panel });
+  panel(doc, left, y, half, chartPanelHeight, { fill: COLORS.panel });
   doc.font(FONTS.bold).fontSize(10).fillColor(COLORS.text).text('Distribucion global por severidad', left + 14, y + 14, { width: half - 28 });
   drawSeverityBars(doc, left + 14, y + 42, half - 28, report.groups.severity);
 
-  panel(doc, left + half + gap, y, half, 172, { fill: COLORS.panel });
-  doc.font(FONTS.bold).fontSize(10).fillColor(COLORS.text).text('Hallazgos por herramienta', left + half + gap + 14, y + 14, { width: half - 28 });
-  drawHorizontalChart(doc, left + half + gap + 14, y + 42, half - 28, report.toolChart, {
+  panel(doc, left + half + gap, y, half, chartPanelHeight, { fill: COLORS.panel });
+  doc.font(FONTS.bold).fontSize(10).fillColor(COLORS.text).text('Resultados tecnicos por herramienta', left + half + gap + 14, y + 14, { width: half - 28 });
+  const toolChartHeight = drawHorizontalChart(doc, left + half + gap + 14, y + 42, half - 28, report.toolChart, {
     maxItems: 8,
     colors: [COLORS.low, COLORS.medium, COLORS.high, COLORS.success, COLORS.info]
   });
+  const noteY = Math.min(y + chartPanelHeight - 34, y + 42 + toolChartHeight + 10);
+  doc.font(FONTS.regular).fontSize(6.8).fillColor(COLORS.subtle)
+    .text('Incluye resultados tecnicos, candidatos y hardening; no todos son vulnerabilidades confirmadas.', left + half + gap + 14, noteY, { width: half - 28 });
 
-  doc.y = y + 188;
+  doc.y = y + chartPanelHeight + 16;
   ensureSpace(doc, 112);
   panel(doc, left, doc.y, PAGE.contentWidth, 96, { fill: COLORS.panel });
   doc.font(FONTS.bold).fontSize(10).fillColor(COLORS.text).text('Score global de riesgo', left + 16, doc.y + 14);
   drawRiskGauge(doc, left + 16, doc.y + 42, PAGE.contentWidth - 32, report.risk.score);
   doc.y += 112;
-}
-
-function drawMethodology(doc) {
-  sectionTitle(doc, 'Metodologia', 'Pipeline');
-  const { left } = pageBounds(doc);
-  const steps = [
-    ['subfinder', 'Descubrimiento de subdominios.'],
-    ['httpx', 'Identificacion de activos vivos y servicios HTTP/HTTPS.'],
-    ['headers/cookies/httpsRedirect/tls/robotsSitemap', 'Analisis pasivo, hardening y configuracion defensiva.'],
-    ['ports/nmap', 'Identificacion de servicios expuestos y puertos relevantes.'],
-    ['feroxbuster', 'Descubrimiento controlado de rutas ocultas o sensibles.'],
-    ['katana', 'Crawling para ampliar endpoints y superficie util.'],
-    ['gau', 'URLs historicas y endpoints parametrizados.'],
-    ['gf', 'Priorizacion por patrones. No confirma vulnerabilidades.'],
-    ['nuclei', 'Plantillas para vulnerabilidades conocidas y exposiciones reconocibles.'],
-    ['dalfox', 'Validacion automatizada de XSS.'],
-    ['sqlmap', 'Validacion de SQL Injection cuando existen candidatos adecuados.'],
-    ['trufflehog', 'Deteccion de secretos expuestos en recursos accesibles.'],
-    ['IA', 'Enriquecimiento de impacto, contexto y recomendaciones sin inventar evidencias.']
-  ];
-
-  steps.forEach(([tool, description]) => {
-    ensureSpace(doc, 34);
-    panel(doc, left, doc.y, PAGE.contentWidth, 28, { fill: COLORS.panelAlt, accent: COLORS.low });
-    doc.font(FONTS.bold).fontSize(8).fillColor(COLORS.text).text(tool, left + 12, doc.y + 8, { width: 160 });
-    doc.font(FONTS.regular).fontSize(8).fillColor(COLORS.muted).text(description, left + 178, doc.y + 8, { width: PAGE.contentWidth - 196 });
-    doc.y += 34;
-  });
 }
 
 function drawFindingsSummaryTable(doc, report) {
@@ -532,7 +518,7 @@ function drawTechnicalAnnex(doc, report) {
   sectionTitle(doc, 'Anexo tecnico', 'Ejecucion');
   drawTimeline(doc, report);
   drawToolStatus(doc, report);
-  drawLimitations(doc);
+  drawLimitations(doc, report);
 }
 
 function drawTimeline(doc, report) {
@@ -541,12 +527,40 @@ function drawTimeline(doc, report) {
     emptyPanel(doc, 'No hay timeline registrado.');
     return;
   }
-  drawBulletPanel(
-    doc,
-    'Herramientas ejecutadas y estado',
-    items.map(item => `[${text(item.status, '--').toUpperCase()}] ${text(item.tool, '--')} - ${text(item.detail, '--')}${item.duration_ms ? ` (${item.duration_ms} ms)` : ''}`),
-    COLORS.low
-  );
+  const { left } = pageBounds(doc);
+  ensureSpace(doc, 44);
+  doc.font(FONTS.bold).fontSize(10).fillColor(COLORS.text)
+    .text('Herramientas ejecutadas y estado', left, doc.y, { width: PAGE.contentWidth });
+  doc.moveDown(0.5);
+
+  items.forEach(item => {
+    const extras = [
+      item.warning ? `Warning: ${item.warning}` : null,
+      item.error ? `Error: ${item.error}` : null
+    ].filter(Boolean);
+    const detail = `[${text(item.status, '--').toUpperCase()}] ${text(item.tool, '--')} - ${text(item.detail, 'sin datos')}${item.duration_ms ? ` (${item.duration_ms} ms)` : ''}`;
+    const extraText = extras.join(' | ');
+    const rowHeight = extraText ? 46 : 32;
+
+    ensureSpace(doc, rowHeight + 8);
+    const y = doc.y;
+    const color = item.status === 'error'
+      ? COLORS.critical
+      : item.status === 'partial'
+        ? COLORS.medium
+        : item.status === 'success'
+          ? COLORS.success
+          : COLORS.info;
+
+    panel(doc, left, y, PAGE.contentWidth, rowHeight, { fill: COLORS.panelAlt, accent: color });
+    doc.font(FONTS.mono).fontSize(7.4).fillColor(COLORS.text)
+      .text(detail, left + 14, y + 10, { width: PAGE.contentWidth - 28 });
+    if (extraText) {
+      doc.font(FONTS.regular).fontSize(7).fillColor(COLORS.muted)
+        .text(truncate(extraText, 175), left + 14, y + 26, { width: PAGE.contentWidth - 28 });
+    }
+    doc.y = y + rowHeight + 6;
+  });
 }
 
 function drawToolStatus(doc, report) {
@@ -561,11 +575,12 @@ function drawToolStatus(doc, report) {
   drawBulletPanel(doc, 'Contadores por herramienta', items.length ? items : ['No hay contadores por herramienta disponibles.'], COLORS.info);
 }
 
-function drawLimitations(doc) {
+function drawLimitations(doc, report = {}) {
   drawBulletPanel(doc, 'Limitaciones del analisis', [
     'Los resultados automatizados dependen de la accesibilidad del objetivo, permisos, WAF, timeouts y profundidad configurada.',
     'Los candidatos de GF y superficie descubierta requieren validacion manual antes de tratarlos como vulnerabilidades confirmadas.',
-    'No se generan CVE, CVSS, CWE u OWASP si no existen en la evidencia recibida.'
+    'No se generan CVE, CVSS, CWE u OWASP si no existen en la evidencia recibida.',
+    ...safeArray(report.limitations)
   ], COLORS.medium);
 
   drawBulletPanel(doc, 'Nota etica y legal', [
@@ -608,7 +623,6 @@ module.exports = {
   drawFindingsSummaryTable,
   drawHardening,
   drawHeaderFooter,
-  drawMethodology,
   drawMetrics,
   drawPageBackground,
   drawRecommendations,

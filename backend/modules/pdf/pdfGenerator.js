@@ -10,7 +10,6 @@ const {
   drawGfCandidates,
   drawHardening,
   drawHeaderFooter,
-  drawMethodology,
   drawMetrics,
   drawPageBackground,
   drawRecommendations,
@@ -53,7 +52,6 @@ function renderReport(doc, report) {
   drawExecutiveSummary(doc, report);
   drawMetrics(doc, report);
   drawCharts(doc, report);
-  drawMethodology(doc, report);
 
   doc.addPage();
   drawFindingsSummaryTable(doc, report);

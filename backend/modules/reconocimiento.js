@@ -78,10 +78,13 @@ function ejecutarConInput(binario, args = [], input = '', opciones = {}) {
     let stdout = '';
     let stderr = '';
     let timedOut = false;
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      child.kill('SIGTERM');
-    }, opciones.timeout || 180000);
+    const timeoutMsProceso = Number(opciones.timeout === undefined ? 180000 : opciones.timeout);
+    const timeout = timeoutMsProceso > 0
+      ? setTimeout(() => {
+          timedOut = true;
+          child.kill('SIGTERM');
+        }, timeoutMsProceso)
+      : null;
 
     child.stdout.on('data', data => {
       stdout += data.toString();
@@ -91,11 +94,11 @@ function ejecutarConInput(binario, args = [], input = '', opciones = {}) {
       stderr += data.toString();
     });
     child.on('error', error => {
-      clearTimeout(timeout);
+      if (timeout) clearTimeout(timeout);
       reject(error);
     });
     child.on('close', code => {
-      clearTimeout(timeout);
+      if (timeout) clearTimeout(timeout);
       if (timedOut) return reject(new Error(`${binario} excedio el tiempo limite.`));
       if (code !== 0 && !(opciones.permitirFalloSinSalida && !stdout.trim())) {
         if (stdout && stdout.trim()) return resolve(stdout);
@@ -552,7 +555,7 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
       logVar(`${nombre}.args`, args);
       logVar(`${nombre}.input`, input);
       const raw = await ejecutarConInput(binario, args, input, {
-        timeout: timeoutMs,
+        timeout: nombre === 'nuclei' ? 0 : timeoutMs,
         permitirFalloSinSalida: nombre === 'nuclei' || opciones.permitirFalloSinSalida
       });
       logVar(`${nombre}.raw`, raw);
@@ -962,7 +965,7 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
     ? await ejecutarHerramientaInput(
         'nuclei',
         'nuclei',
-        ['-severity', severidadesNuclei, '-exclude-tags', excludeTags, '-silent', '-timeout', '10', '-no-color'],
+        ['-severity', severidadesNuclei, '-exclude-tags', excludeTags, '-silent', '-no-color'],
         inputNuclei,
         parsearLineas,
         { permitirFalloSinSalida: true }

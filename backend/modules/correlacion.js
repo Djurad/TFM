@@ -75,13 +75,16 @@ function correlacionarFindings(findings = [], toolResults = {}) {
   }));
   const correlations = [];
 
-  const byTool = tool => enriquecidos.filter(f => f.tool === tool);
+  const byTool = tool => enriquecidos.filter(f => String(f.tool || '').toLowerCase() === String(tool || '').toLowerCase());
   const gf = byTool('gf');
   const katana = byTool('katana');
   const dalfox = byTool('dalfox');
   const sqlmap = byTool('sqlmap');
   const headers = byTool('headers');
-  const httpsRedirect = enriquecidos.filter(f => f.type === 'missing_https_redirect' || f.tool === 'httpsredirect');
+  const httpsRedirect = enriquecidos.filter(f =>
+    f.type === 'missing_https_redirect' ||
+    String(f.tool || '').toLowerCase() === 'httpsredirect'
+  );
   const ports = byTool('ports');
 
   dalfox
@@ -125,13 +128,13 @@ function correlacionarFindings(findings = [], toolResults = {}) {
     .forEach(candidate => {
       const sql = sqlmap.find(item => mismaZona(candidate, item));
       if (!sql) return;
-      const confirmada = sql.status === 'confirmed_sqli' || sql.confidence === 'high';
+      const confirmada = sql.source_status === 'confirmed_sqli' || sql.status === 'confirmed_sqli' || sql.confidence === 'high';
       const description = confirmada
         ? 'GF priorizo el endpoint como candidato SQLi y sqlmap obtuvo evidencia de inyeccion.'
-        : 'GF priorizo el endpoint como candidato SQLi, pero sqlmap no obtuvo evidencia concluyente.';
+        : 'GF priorizo el endpoint como candidato SQLi y sqlmap devolvio una posible SQLi que requiere validacion manual.';
       const correlation = crearRelacion({
-        severity: confirmada ? 'high' : 'low',
-        title: confirmada ? 'GF/SQLMap confirmado' : 'GF/SQLMap no concluyente',
+        severity: confirmada ? 'high' : 'medium',
+        title: confirmada ? 'GF/SQLMap confirmado' : 'GF/SQLMap posible',
         chain: ['gf', 'sqlmap'],
         description,
         findings: [candidate, sql]

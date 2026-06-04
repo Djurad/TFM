@@ -1,10 +1,4 @@
-const { resumenSeveridad } = require('./normalizacion');
-const HARDENING_TYPES = new Set([
-  'missing_security_header',
-  'insecure_cookie',
-  'missing_https_redirect',
-  'tls_certificate_issue'
-]);
+const { buildFindingGroups } = require('./findingGroups');
 
 function agruparPorHerramienta(findings) {
   return findings.reduce((grupos, finding) => {
@@ -13,20 +7,6 @@ function agruparPorHerramienta(findings) {
     grupos[tool].push(finding);
     return grupos;
   }, {});
-}
-
-function esConfirmada(finding) {
-  return finding.isVulnerability === true &&
-    finding.confidence === 'high' &&
-    !HARDENING_TYPES.has(finding.type) &&
-    finding.isFalsePositiveLikely !== true;
-}
-
-function esPosible(finding) {
-  return finding.isVulnerability === true &&
-    finding.confidence === 'medium' &&
-    !HARDENING_TYPES.has(finding.type) &&
-    finding.isFalsePositiveLikely !== true;
 }
 
 function lineaFinding(finding) {
@@ -55,9 +35,8 @@ function listaAnexo(findings, fallback) {
   ).join('\n');
 }
 
-function generarResumenEjecutivo(target, confirmadas, posibles, superficie, reconocimiento, descartados, contexto = {}) {
+function generarResumenEjecutivo(target, confirmadas, posibles, gfCandidates, hardening, superficie, reconocimiento, descartados, contexto = {}, summary = {}) {
   const reportables = [...confirmadas, ...posibles];
-  const summary = resumenSeveridad(reportables);
   const herramientas = Object.keys(contexto.toolResults || {}).join(', ') || 'herramientas automatizadas configuradas';
 
   const score = contexto.risk_score === null || contexto.risk_score === undefined
@@ -80,9 +59,9 @@ Distribucion por severidad de vulnerabilidades reportables: critical=${summary.c
 
 Herramientas utilizadas: ${herramientas}.
 
-La cobertura se amplio con fuentes historicas y fuerza bruta controlada cuando estaban disponibles, manteniendo esos resultados separados de las vulnerabilidades.
+La cobertura se amplio con fuentes historicas, fuerza bruta controlada y patrones GF cuando estaban disponibles, manteniendo esos resultados separados de las vulnerabilidades.
 
-La superficie descubierta (${superficie.length}), el reconocimiento informativo (${reconocimiento.length}) y los falsos positivos o descartados (${descartados.length}) se incluyen solo como anexos y no forman parte del conteo principal de vulnerabilidades.
+Los candidatos GF (${gfCandidates.length}), hardening (${hardening.length}), superficie descubierta (${superficie.length}), reconocimiento informativo (${reconocimiento.length}) y falsos positivos o descartados (${descartados.length}) se incluyen separados y no forman parte del conteo principal de vulnerabilidades.
 `;
 }
 
@@ -177,19 +156,14 @@ function generarAnexoHerramienta(titulo, findings, fallback) {
 }
 
 async function generarInformeDesdeFindings(target, findings, contexto = {}) {
-  const confirmadas = findings.filter(esConfirmada);
-  const posibles = findings.filter(esPosible);
-  const superficie = findings.filter(f => f.type === 'surface');
-  const reconocimiento = findings.filter(f =>
-    (f.isVulnerability === false || f.type === 'reconocimiento') &&
-    !['surface', 'discarded'].includes(f.type)
-  );
-  const descartados = findings.filter(f =>
-    f.type === 'discarded' ||
-    f.isFalsePositiveLikely ||
-    (f.isVulnerability === true && f.confidence === 'low')
-  );
-  const hardening = findings.filter(f => HARDENING_TYPES.has(f.type));
+  const grupos = buildFindingGroups(findings);
+  const confirmadas = grupos.confirmed;
+  const posibles = grupos.possible;
+  const gfCandidates = grupos.gfCandidates;
+  const superficie = grupos.attackSurface;
+  const reconocimiento = grupos.informational;
+  const descartados = [...grupos.discarded, ...grupos.falsePositives];
+  const hardening = grupos.hardening;
   const feroxFindings = findings.filter(f => f.tool === 'feroxbuster');
   const gauFindings = findings.filter(f => f.tool === 'gau');
   const gfFindings = findings.filter(f => f.tool === 'gf');
@@ -199,12 +173,13 @@ async function generarInformeDesdeFindings(target, findings, contexto = {}) {
   );
 
   const secciones = [
-    generarResumenEjecutivo(target, confirmadas, posibles, superficie, reconocimiento, descartados, contexto),
+    generarResumenEjecutivo(target, confirmadas, posibles, gfCandidates, hardening, superficie, reconocimiento, descartados, contexto, grupos.severityReportable),
     generarSeccionScore(contexto),
     generarTimeline(contexto),
     generarCorrelaciones(contexto),
     generarSeccion('Vulnerabilidades confirmadas', confirmadas, 'No se identificaron vulnerabilidades confirmadas.'),
     generarSeccion('Posibles vulnerabilidades', posibles, 'No se identificaron posibles vulnerabilidades con evidencia suficiente.'),
+    generarSeccion('Candidatos priorizados por GF', gfCandidates, 'No se identificaron candidatos GF.'),
     generarSeccion('Hardening y configuracion defensiva', hardening, 'No se identificaron problemas de hardening destacables.'),
     generarRecomendacionesPrioritarias(confirmadas, posibles),
     generarAnexoHerramienta('Anexo: analisis pasivo defensivo', passiveFindings, 'No hay hallazgos pasivos defensivos registrados.'),

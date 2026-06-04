@@ -6,6 +6,8 @@ const PESOS_SEVERIDAD = {
   critical: 10
 };
 
+const { normalizeFindingClassification, normalizeSeverity } = require('./findingGroups');
+
 function obtenerCriticidadHallazgo(severidad) {
   return PESOS_SEVERIDAD[severidad] || 0;
 }
@@ -201,8 +203,16 @@ function puntuarFinding(finding = {}, acumulado, caps) {
   const severity = String(finding.severity || 'info').toLowerCase();
   const confidence = String(finding.confidence || 'low').toLowerCase();
 
-  if (type === 'discarded' || finding.isFalsePositiveLikely) return 0;
-  if (tool === 'gf' || type === 'gf-candidate') return sumarConCap(acumulado, 'gf', 1, caps);
+  const normalized = normalizeFindingClassification(finding);
+  const normalizedType = String(normalized.type || '').toLowerCase();
+  const category = String(normalized.category || '').toLowerCase();
+  const normalizedSeverity = normalizeSeverity(normalized.severity);
+  const normalizedConfidence = String(normalized.confidence || 'low').toLowerCase();
+
+  if (normalizedType === 'discarded' || normalizedType === 'false_positive' || normalized.isFalsePositiveLikely) return 0;
+  if (normalizedType === 'gf_candidate' || category === 'candidate' || tool === 'gf') {
+    return sumarConCap(acumulado, 'gf', normalizedSeverity === 'medium' ? 1.5 : 1, caps);
+  }
 
   if (tool === 'trufflehog' || type === 'exposed-secret') {
     return finding.verified || confidence === 'high' ? 40 : 15;
@@ -215,35 +225,31 @@ function puntuarFinding(finding = {}, acumulado, caps) {
     return 0;
   }
 
-  if (HARDENING_TYPES_SCORE.has(type)) {
-    const valor = severity === 'medium' ? 4 : severity === 'low' ? 2 : severity === 'high' ? 8 : 0;
+  if (normalizedType === 'hardening' || category === 'hardening' || HARDENING_TYPES_SCORE.has(type)) {
+    const valor = normalizedSeverity === 'medium' ? 4 : normalizedSeverity === 'low' ? 2 : normalizedSeverity === 'high' ? 8 : 0;
     return sumarConCap(acumulado, 'hardening', valor, caps);
   }
 
-  if (type === 'surface') {
-    return sumarConCap(acumulado, 'surface', severity === 'medium' ? 5 : 2, caps);
+  if (normalizedType === 'attack_surface' || category === 'attack_surface' || type === 'surface') {
+    return sumarConCap(acumulado, 'surface', normalizedSeverity === 'medium' ? 5 : 2, caps);
   }
 
-  if (type === 'reconocimiento' || severity === 'info' || finding.isVulnerability !== true) return 0;
+  if (normalizedType === 'informational' || normalizedSeverity === 'info' || normalized.isVulnerability !== true) return 0;
 
-  if (tool === 'sqlmap' && finding.status === 'possible_sqli' && !tieneEvidenciaSqlmap(finding)) {
-    return 3;
+  if (normalizedType === 'confirmed_vulnerability' || normalizedConfidence === 'high') {
+    if (normalizedSeverity === 'critical') return 45;
+    if (normalizedSeverity === 'high') return 35;
+    if (normalizedSeverity === 'medium') return 22;
+    if (normalizedSeverity === 'low') return 10;
   }
 
-  if (confidence === 'high' || confidence === 'confirmed') {
-    if (severity === 'critical') return 45;
-    if (severity === 'high') return 35;
-    if (severity === 'medium') return 22;
-    if (severity === 'low') return 10;
+  if (normalizedType === 'possible_vulnerability' || normalizedConfidence === 'medium') {
+    if (normalizedSeverity === 'high') return 15;
+    if (normalizedSeverity === 'medium') return 8;
+    if (normalizedSeverity === 'low') return 3;
   }
 
-  if (confidence === 'medium') {
-    if (severity === 'high') return 15;
-    if (severity === 'medium') return 8;
-    if (severity === 'low') return 3;
-  }
-
-  return severity === 'low' ? 1 : 0;
+  return normalizedSeverity === 'low' ? 1 : 0;
 }
 
 function calcularRiskScore(findings = []) {

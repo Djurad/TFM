@@ -1,4 +1,5 @@
 const PDFDocument = require('pdfkit');
+const { generarPdfAuditoria } = require('../modules/pdf/pdfGenerator');
 
 function escribirTexto(doc, texto) {
   String(texto || '')
@@ -47,6 +48,10 @@ function generarPdfDesdeInforme(res, target, informe) {
   doc.end();
 }
 
+function generarPdfDesdeDatos(res, target, findings, contexto = {}) {
+  generarPdfAuditoria(res, target, findings, contexto);
+}
+
 // Compatibilidad con el endpoint antiguo /descargar.
 function generarPdfRespuesta(res, prompt, respuesta) {
   generarPdfDesdeInforme(res, prompt, respuesta);
@@ -54,5 +59,6 @@ function generarPdfRespuesta(res, prompt, respuesta) {
 
 module.exports = {
   generarPdfRespuesta,
-  generarPdfDesdeInforme
+  generarPdfDesdeInforme,
+  generarPdfDesdeDatos
 };

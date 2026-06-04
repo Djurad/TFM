@@ -115,91 +115,96 @@ function findingsNuclei(toolResult, target) {
 
 function findingsDalfox(toolResult, target) {
   const items = Array.isArray(toolResult.parsed) ? toolResult.parsed : [];
-  const grupos = new Map();
+  const vistos = new Set();
+  const findings = [];
 
-  items
-    .filter(item => {
-      const parsed = normalizarItemDalfox(item);
-      const raw = JSON.stringify(parsed).toLowerCase();
-      return raw.includes('xss') ||
-        raw.includes('vulnerable') ||
-        raw.includes('poc') ||
-        raw.includes('payload') ||
-        raw.includes('proof');
-    })
-    .forEach(item => {
-      const parsed = normalizarItemDalfox(item);
-      const url = parsed.url || parsed.target || parsed.data || null;
-      const param = parsed.param || obtenerPrimerParametro(url);
-      const payload = limpiarValorDalfox(parsed.payload || parsed.poc || '');
-      const evidence = limpiarValorDalfox(parsed.evidence || parsed.message_str || '');
-      const injectType = parsed.inject_type || parsed.type || 'desconocido';
-      const severity = normalizarSeveridadDalfox(parsed.severity, parsed.type);
-      const tipoDalfox = String(parsed.type || parsed.status || parsed.severity || '').toLowerCase();
-      const confirmed = String(parsed.type || '').toUpperCase() === 'V' ||
-        tipoDalfox.includes('confirmed') ||
-        tipoDalfox.includes('triggered') ||
-        Boolean(parsed.triggered);
-      const rawReference = JSON.stringify(parsed);
-      const groupKey = [
-        obtenerOrigenYRuta(url || target),
-        param || '',
-        injectType,
-        confirmed ? 'confirmed' : 'probable'
-      ].join('|');
+  items.forEach(item => {
+    const parsed = normalizarItemDalfox(item);
+    if (!parsed || !Object.keys(parsed).length) return;
 
-      if (!grupos.has(groupKey)) {
-        grupos.set(groupKey, {
-          url,
-          param,
-          injectType,
-          severity,
-          confirmed,
-          payloads: [],
-          evidences: [],
-          rawReferences: []
-        });
-      }
+    const raw = JSON.stringify(parsed).toLowerCase();
+    const relevante = raw.includes('xss') ||
+      raw.includes('vulnerable') ||
+      raw.includes('poc') ||
+      raw.includes('payload') ||
+      raw.includes('proof') ||
+      String(parsed.type || '').toUpperCase() === 'V';
 
-      const grupo = grupos.get(groupKey);
+    if (!relevante) return;
 
-      if (severity === 'high') grupo.severity = 'high';
-      if (confirmed) grupo.confirmed = true;
-      if (payload && grupo.payloads.length < 4 && !grupo.payloads.includes(payload)) grupo.payloads.push(payload);
-      if (evidence && grupo.evidences.length < 4 && !grupo.evidences.includes(evidence)) grupo.evidences.push(evidence);
-      if (rawReference && grupo.rawReferences.length < 4) grupo.rawReferences.push(rawReference);
+    const url = parsed.data || parsed.url || parsed.target || null;
+    const param = parsed.param || obtenerPrimerParametro(url);
+    const payload = limpiarValorDalfox(parsed.payload || parsed.poc || '');
+    const evidence = limpiarValorDalfox(parsed.evidence || parsed.message_str || '');
+    const injectType = parsed.inject_type || 'desconocido';
+    const tipoDalfox = String(parsed.type || parsed.status || parsed.severity || '').toLowerCase();
+    const confirmed = String(parsed.type || '').toUpperCase() === 'V' ||
+      tipoDalfox.includes('confirmed') ||
+      tipoDalfox.includes('triggered') ||
+      Boolean(parsed.triggered);
+    const severity = confirmed ? 'high' : normalizarSeveridadDalfox(parsed.severity, parsed.type);
+    const key = [
+      obtenerOrigenYRuta(url || target),
+      param || '',
+      injectType,
+      payload || '',
+      confirmed ? 'confirmed' : 'probable'
+    ].join('|');
+
+    if (vistos.has(key)) return;
+    vistos.add(key);
+
+    const readableEvidence = [
+      url ? `URL vulnerable: ${url}` : null,
+      param ? `Parametro: ${param}` : null,
+      injectType ? `Tipo de inyeccion: ${injectType}` : null,
+      parsed.poc_type ? `POC type: ${parsed.poc_type}` : null,
+      parsed.method ? `Metodo: ${parsed.method}` : null,
+      payload ? `Payload: ${payload}` : null,
+      evidence ? `Evidencia: ${evidence}` : null,
+      parsed.message_str ? `Mensaje Dalfox: ${limpiarValorDalfox(parsed.message_str)}` : null
+    ].filter(Boolean).join('\n');
+
+    findings.push({
+      id: `dalfox-xss-${findings.length + 1}`,
+      tool: 'dalfox',
+      type: confirmed ? 'confirmed_vulnerability' : 'possible_vulnerability',
+      title: confirmed ? 'XSS confirmado por Dalfox' : 'Posible XSS reflejado por Dalfox',
+      description: confirmed
+        ? `Dalfox confirmo XSS en el parametro ${param || 'identificado'}.`
+        : `Dalfox detecto indicios de XSS en el parametro ${param || 'identificado'} que requieren validacion.`,
+      severity,
+      confidence: confirmed ? 'high' : 'medium',
+      cvss: null,
+      cwe: parsed.cwe || 'CWE-79',
+      affected_asset: target,
+      affected_url: url,
+      evidence: readableEvidence,
+      impact: confirmed
+        ? 'Permite ejecutar JavaScript en el navegador de usuarios que visiten el enlace manipulado.'
+        : '',
+      recommendation: confirmed
+        ? 'Sanitizar entradas, escapar salidas segun contexto HTML/URL y reforzar Content-Security-Policy.'
+        : '',
+      false_positive_risk: confirmed ? 'low' : 'medium',
+      isVulnerability: true,
+      confirmed,
+      reportable: true,
+      requiresManualValidation: !confirmed,
+      param,
+      parametro: param,
+      payload,
+      inject_type: parsed.inject_type || null,
+      poc_type: parsed.poc_type || null,
+      method: parsed.method || null,
+      message_str: parsed.message_str || null,
+      dalfox_type: parsed.type || null,
+      raw_reference: JSON.stringify(parsed).slice(0, 1600)
     });
+  });
 
   return normalizarFindings(
-    Array.from(grupos.values()).map((grupo, index) => {
-      const readableEvidence = [
-        `URL base: ${obtenerOrigenYRuta(grupo.url || target)}`,
-        grupo.url ? `Ejemplo vulnerable: ${grupo.url}` : null,
-        grupo.param ? `Parametro: ${grupo.param}` : null,
-        `Tipo de inyeccion: ${grupo.injectType}`,
-        grupo.payloads.length ? `Payloads observados:\n- ${grupo.payloads.join('\n- ')}` : null,
-        grupo.evidences.length ? `Evidencias observadas:\n- ${grupo.evidences.join('\n- ')}` : null
-      ].filter(Boolean).join('\n');
-
-      return {
-        id: `dalfox-xss-${index + 1}`,
-        tool: 'dalfox',
-        type: 'xss',
-        title: grupo.confirmed ? 'XSS confirmado por Dalfox' : 'Posible XSS reflejado',
-        description: `Dalfox detecto un posible XSS en el parametro ${grupo.param || 'identificado'} usando payloads reflejados en contexto ${grupo.injectType}.`,
-        severity: grupo.confirmed ? 'high' : grupo.severity,
-        confidence: grupo.confirmed ? 'confirmed' : 'probable',
-        cvss: null,
-        cwe: 'CWE-79',
-        affected_asset: target,
-        affected_url: grupo.url,
-        evidence: readableEvidence,
-        impact: '',
-        recommendation: '',
-        false_positive_risk: grupo.confirmed ? 'low' : 'medium',
-        raw_reference: grupo.rawReferences.join('\n').slice(0, 1600)
-      };
-    }),
+    findings,
     'dalfox',
     target
   );
@@ -852,13 +857,17 @@ function findingsGf(toolResult, target) {
       findings.push({
         id: `gf-${tipo}-${findings.length + 1}`,
         tool: 'gf',
-        type: 'gf-candidate',
+        type: 'gf_candidate',
+        category: 'candidate',
         vulnerability_type: tipo,
         title: tituloGf(tipo),
         description: `GF marco esta URL como candidata para pruebas de ${tipo.toUpperCase()}. No confirma explotabilidad.`,
         severity: severidadGf(tipo),
-        confidence: 'medium',
-        isVulnerability: true,
+        confidence: 'low',
+        isVulnerability: false,
+        confirmed: false,
+        reportable: false,
+        requiresManualValidation: true,
         affected_asset: target,
         affected_url: url,
         evidence: `Patron GF: ${tipo}\nURL: ${url}`,

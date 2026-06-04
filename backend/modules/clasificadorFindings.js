@@ -39,6 +39,8 @@ const RUTAS_STATIC = [
   '/js/'
 ];
 
+const { normalizeFindingClassification } = require('./findingGroups');
+
 const SEVERITY_MAP = {
   critical: 'critical',
   high: 'high',
@@ -178,7 +180,7 @@ function clasificarFinding(raw = {}) {
   }
 
   if (tool === 'gf') {
-    type = 'gf-candidate';
+    type = 'gf_candidate';
     severity = ['medium', 'low'].includes(severityOriginal) ? severityOriginal : 'low';
     confidence = 'low';
     isVulnerability = false;
@@ -282,23 +284,21 @@ function clasificarFinding(raw = {}) {
   if (tool === 'sqlmap') {
     const evidenciaConcluyente = Boolean(raw.payload || raw.dbms || raw.parametro || raw.parameter);
     if ((raw.status === 'confirmed_sqli' || raw.vulnerable === true) && evidenciaConcluyente) {
-      type = 'vulnerability';
+      type = 'confirmed_vulnerability';
       severity = 'critical';
       confidence = 'high';
       isVulnerability = true;
       isFalsePositiveLikely = false;
       falsePositiveReason = '';
     } else if (raw.status === 'possible_sqli') {
-      type = 'vulnerability';
-      severity = evidenciaConcluyente ? 'medium' : 'low';
-      confidence = evidenciaConcluyente ? 'medium' : 'low';
+      type = 'possible_vulnerability';
+      severity = 'high';
+      confidence = 'medium';
       isVulnerability = true;
-      isFalsePositiveLikely = !evidenciaConcluyente;
-      falsePositiveReason = evidenciaConcluyente
-        ? ''
-        : 'Sospecha no concluyente: sqlmap no obtuvo payload, parametro o DBMS suficiente para confirmarlo.';
+      isFalsePositiveLikely = false;
+      falsePositiveReason = '';
     } else if (raw.status === 'confirmed_sqli' || raw.vulnerable === true) {
-      type = 'vulnerability';
+      type = 'confirmed_vulnerability';
       severity = 'medium';
       confidence = 'medium';
       isVulnerability = true;
@@ -334,7 +334,7 @@ function clasificarFinding(raw = {}) {
     falsePositiveReason = falsePositiveReason || 'Hallazgo sin evidencia clara de explotabilidad.';
   }
 
-  return {
+  return normalizeFindingClassification({
     ...raw,
     id,
     tool,
@@ -346,7 +346,7 @@ function clasificarFinding(raw = {}) {
     falsePositiveReason,
     evidence: raw.evidence || raw.evidencia || raw.raw_reference || raw.raw || '',
     recommendation: raw.recommendation || raw.recomendacion || recomendacionPorTipo(type, tool)
-  };
+  });
 }
 
 function clasificarFindings(findings = []) {

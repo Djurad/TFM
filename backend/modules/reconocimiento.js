@@ -10,6 +10,7 @@ const { ejecutarHttpsRedirect } = require('./httpsRedirect');
 const { ejecutarRobotsSitemap } = require('./robotsSitemap');
 const { ejecutarTls } = require('./tls');
 const { ejecutarPorts } = require('./ports');
+const { extraerFindingsDeterministas } = require('./extractores');
 
 function ejecutarComando(comando, opciones = {}) {
   return new Promise((resolve, reject) => {
@@ -224,15 +225,39 @@ function parsearHttpxJson(output) {
     .filter(Boolean);
 }
 
+function esObjetoVacioDalfox(item) {
+  return item &&
+    typeof item === 'object' &&
+    !Array.isArray(item) &&
+    Object.keys(item).length === 0;
+}
+
+function normalizarItemsDalfox(parsed) {
+  const items = Array.isArray(parsed) ? parsed : [parsed];
+  return items
+    .flatMap(item => Array.isArray(item) ? item : [item])
+    .filter(item => item && typeof item === 'object' && !esObjetoVacioDalfox(item));
+}
+
 function parsearDalfox(output) {
-  return parsearLineas(output)
-    .map(linea => {
+  const limpio = limpiarColoresANSI(String(output || '')).trim();
+  if (!limpio) return [];
+
+  try {
+    return normalizarItemsDalfox(JSON.parse(limpio));
+  } catch {
+    // Puede venir como JSON lines o con alguna linea no JSON.
+  }
+
+  return limpio
+    .split('\n')
+    .map(linea => linea.trim())
+    .filter(Boolean)
+    .flatMap(linea => {
       try {
-        return JSON.parse(linea);
+        return normalizarItemsDalfox(JSON.parse(linea));
       } catch {
-        return {
-          raw: linea
-        };
+        return [];
       }
     });
 }
@@ -495,6 +520,7 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
         status: 'success',
         raw,
         parsed,
+        parsed_count: parsedCount,
         findings: []
       };
       logVar(`toolResults.${nombre}`, toolResults[nombre]);
@@ -506,6 +532,7 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
         status: 'error',
         raw: '',
         parsed: [],
+        parsed_count: 0,
         findings: [],
         error: error.message
       };
@@ -558,6 +585,91 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
       console.error(`Error en ${nombre}:`, error.message);
       return '';
     }
+  }
+
+  async function ejecutarDalfoxPorUrl(urls = []) {
+    const urlsValidas = deduplicarUrls(urls);
+    const rawPorUrl = {};
+    const parsedPorUrl = {};
+    const inputPorUrl = {};
+    const parsedTotal = [];
+    let errores = 0;
+
+    if (urlsValidas.length === 0) {
+      const skipped = {
+        status: 'skipped',
+        raw: '',
+        parsed: [],
+        findings: [],
+        error: 'No hay endpoints con parametros para probar XSS.',
+        metrics: {
+          urls_analizadas: 0,
+          hallazgos: 0,
+          confirmadas: 0,
+          errores: 0
+        }
+      };
+      logVar('toolResults.dalfox', skipped);
+      return skipped;
+    }
+
+    progreso('dalfox', 'running', `Ejecutando Dalfox sobre ${urlsValidas.length} URLs`);
+
+    for (const url of urlsValidas) {
+      const input = `${url}\n`;
+      inputPorUrl[url] = input;
+      logVar(`dalfox.inputPorUrl.${url}`, input);
+
+      try {
+        registrarPaso('dalfox', 'ejecutando URL individual', { entrada: url });
+        const raw = await ejecutarConInput(
+          'dalfox',
+          ['pipe', '--silence', '--format', 'json'],
+          input,
+          {
+            timeout: timeoutMs,
+            permitirFalloSinSalida: true
+          }
+        );
+        const parsed = parsearDalfox(raw);
+
+        rawPorUrl[url] = raw;
+        parsedPorUrl[url] = parsed;
+        logVar(`dalfox.rawPorUrl.${url}`, raw);
+        logVar(`dalfox.parsedPorUrl.${url}`, parsed);
+
+        if (parsed.length > 0) parsedTotal.push(...parsed);
+      } catch (error) {
+        errores += 1;
+        rawPorUrl[url] = '';
+        parsedPorUrl[url] = [];
+        logVar(`dalfox.errorPorUrl.${url}`, error.message);
+        console.error(`Error en dalfox para ${url}:`, error.message);
+      }
+    }
+
+    const result = {
+      status: errores === 0 ? 'success' : parsedTotal.length > 0 ? 'partial' : 'error',
+      raw: JSON.stringify(rawPorUrl, null, 2),
+      parsed: parsedTotal,
+      findings: [],
+      error: errores > 0 ? `${errores} ejecuciones de Dalfox fallaron.` : null,
+      metrics: {
+        urls_analizadas: urlsValidas.length,
+        hallazgos: parsedTotal.length,
+        confirmadas: parsedTotal.filter(item => String(item.type || '').toUpperCase() === 'V').length,
+        errores
+      }
+    };
+
+    result.findings = extraerFindingsDeterministas('dalfox', result, target);
+    logVar('dalfox.inputPorUrl', inputPorUrl);
+    logVar('dalfox.rawPorUrl', rawPorUrl);
+    logVar('dalfox.parsedPorUrl', parsedPorUrl);
+    logVar('dalfox.findingsFinales', result.findings);
+    logVar('toolResults.dalfox', result);
+
+    return result;
   }
 
   registrarPaso('normalizacion', 'entrada normalizada', {
@@ -631,7 +743,40 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
     parsearHttpxJson
   );
 
-  const httpx = parsearHttpxJson(httpxOutput);
+  let httpx = parsearHttpxJson(httpxOutput);
+  const httpxFallbackUrls = httpx.length === 0
+    ? deduplicarUrls([entrada.baseUrl, entrada.inputUrl].filter(url => /^https?:\/\//i.test(String(url || ''))))
+    : [];
+
+  if (httpxFallbackUrls.length > 0) {
+    httpx = httpxFallbackUrls.map(url => ({
+      url,
+      finalUrl: url,
+      input: url,
+      statusCode: null,
+      title: null,
+      tecnologias: [],
+      webserver: null,
+      contentLength: null,
+      contentType: null,
+      location: null,
+      fallback: true
+    }));
+
+    if (toolResults.httpx) {
+      toolResults.httpx.status = 'partial';
+      toolResults.httpx.warning = 'httpx no devolvio activos; se usa la URL normalizada como fallback para continuar validaciones HTTP.';
+      toolResults.httpx.parsed = httpx;
+      toolResults.httpx.parsed_count = httpx.length;
+      toolResults.httpx.metrics = {
+        ...(toolResults.httpx.metrics || {}),
+        activos_vivos: httpx.length,
+        fallback: true
+      };
+    }
+    logVar('httpxFallbackUrls', httpxFallbackUrls);
+    logVar('toolResults.httpx', toolResults.httpx);
+  }
   logVar('httpxOutput', httpxOutput);
   logVar('httpx', httpx);
   const activos = deduplicarUrls(httpx.map(item => item.finalUrl || item.url).filter(Boolean));
@@ -847,36 +992,14 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
     xssDesdeGf.length ? xssDesdeGf : urlsParametrizadas,
     xssDesdeGf.length ? maxDalfoxUrls : Math.min(maxDalfoxUrls, 30)
   );
-  const inputDalfox = urlsDalfox.join('\n');
   logVar('urlsDalfox', urlsDalfox);
-  logVar('inputDalfox', inputDalfox);
 
   console.log(`[dalfox] URLs recibidas desde gf xss: ${xssDesdeGf.length}`);
 
-  const dalfoxOutput = urlsDalfox.length > 0
-    ? await ejecutarHerramientaInput(
-        'dalfox',
-        'dalfox',
-        ['pipe', '--silence', '--format', 'json'],
-        inputDalfox,
-        parsearDalfox
-      )
-    : '';
-
-  if (urlsDalfox.length === 0) {
-    toolResults.dalfox = {
-      status: 'skipped',
-      raw: '',
-      parsed: [],
-      findings: [],
-      error: 'No hay endpoints con parametros para probar XSS.'
-    };
-    logVar('toolResults.dalfox', toolResults.dalfox);
-  }
+  toolResults.dalfox = await ejecutarDalfoxPorUrl(urlsDalfox);
   progreso('dalfox', toolResults.dalfox?.status || 'done', 'Dalfox finalizado');
 
-  const dalfox = parsearDalfox(dalfoxOutput);
-  logVar('dalfoxOutput', dalfoxOutput);
+  const dalfox = toolResults.dalfox.parsed || [];
   logVar('dalfox', dalfox);
 
   console.log(`[sqlmap] URLs recibidas desde gf sqli: ${sqliDesdeGf.length}`);
@@ -1011,5 +1134,6 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
 
 module.exports = {
   ejecutarReconocimiento,
-  normalizarUrlParaSqlmap
+  normalizarUrlParaSqlmap,
+  parsearDalfox
 };

@@ -2,26 +2,23 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env'), override: true });
-const { generarPdfRespuesta, generarPdfDesdeInforme } = require('./utils/pdf');
+const { generarPdfRespuesta, generarPdfDesdeDatos } = require('./utils/pdf');
 const { ejecutarReconocimiento } = require('./modules/reconocimiento');
 const { enriquecerFindingsIA } = require('./modules/ia');
-const { normalizarFindings, resumenSeveridad } = require('./modules/normalizacion');
-const { generarInformeDesdeFindings } = require('./modules/informe');
+const { normalizarFindings } = require('./modules/normalizacion');
 const { extraerFindingsDeterministas } = require('./modules/extractores');
 const { clasificarFindings } = require('./modules/clasificadorFindings');
 const { calcularRiskScore } = require('./modules/scoring');
 const { correlacionarFindings, normalizarUrl, origenYRuta, parametro } = require('./modules/correlacion');
 const { crearScanLogger } = require('./modules/scanLogger');
+const {
+  buildDashboardMetrics,
+  buildFindingGroups,
+  normalizeFindingsForReporting
+} = require('./modules/findingGroups');
 
 const app = express();
 const PORT = 3000;
-const HARDENING_TYPES = new Set([
-  'missing_security_header',
-  'insecure_cookie',
-  'missing_https_redirect',
-  'tls_certificate_issue'
-]);
-
 app.use(cors());
 
 app.use((req, res, next) => {
@@ -49,15 +46,7 @@ function serializarToolResult(result) {
 }
 
 function agruparFindings(findings = []) {
-  return {
-    confirmadas: findings.filter(f => f.isVulnerability && f.confidence === 'high' && !f.isFalsePositiveLikely && !HARDENING_TYPES.has(f.type)),
-    posibles: findings.filter(f => f.isVulnerability && f.confidence === 'medium' && !f.isFalsePositiveLikely && !HARDENING_TYPES.has(f.type)),
-    hardening: findings.filter(f => HARDENING_TYPES.has(f.type)),
-    baja_confianza: findings.filter(f => f.isVulnerability && (f.confidence === 'low' || f.isFalsePositiveLikely) && !HARDENING_TYPES.has(f.type)),
-    superficie: findings.filter(f => f.type === 'surface'),
-    reconocimiento: findings.filter(f => (!f.isVulnerability || f.type === 'reconocimiento') && f.type !== 'surface' && f.type !== 'discarded' && !HARDENING_TYPES.has(f.type)),
-    descartados: findings.filter(f => f.type === 'discarded')
-  };
+  return buildFindingGroups(findings);
 }
 
 function construirCandidatosGf(toolResults = {}) {
@@ -73,21 +62,26 @@ function construirCandidatosGf(toolResults = {}) {
 }
 
 function construirResumenUI(grupos) {
-  const confirmadas = grupos.confirmadas?.length || 0;
-  const posibles = grupos.posibles?.length || 0;
+  const confirmadas = grupos.confirmed?.length || grupos.confirmadas?.length || 0;
+  const posibles = grupos.possible?.length || grupos.posibles?.length || 0;
+  const gfCandidates = grupos.gfCandidates?.length || grupos.gf_candidates?.length || 0;
   const hardening = grupos.hardening?.length || 0;
-  const superficie = grupos.superficie?.length || 0;
-  const reconocimiento = grupos.reconocimiento?.length || 0;
-  const descartados = (grupos.descartados?.length || 0) + (grupos.baja_confianza?.length || 0);
+  const superficie = grupos.attackSurface?.length || grupos.superficie?.length || 0;
+  const informativos = grupos.informational?.length || grupos.reconocimiento?.length || 0;
+  const descartados = grupos.discarded?.length || grupos.descartados?.length || 0;
+  const falsePositives = grupos.falsePositives?.length || grupos.baja_confianza?.length || 0;
 
   return {
     confirmadas,
     posibles,
+    gf_candidates: gfCandidates,
     total_vulnerabilidades: confirmadas + posibles,
     hardening,
     superficie,
-    reconocimiento,
-    descartados
+    informativos,
+    reconocimiento: informativos,
+    descartados,
+    false_positives: falsePositives
   };
 }
 
@@ -315,6 +309,7 @@ function debeAnalizarHallazgoIA(finding = {}) {
 
 app.post('/analizar', async (req, res) => {
   try {
+    const enviar = () => {};
     const entrada = req.body.prompt || req.body.target;
 
     if (!entrada || typeof entrada !== 'string' || !entrada.trim()) {
@@ -387,16 +382,17 @@ app.post('/analizar', async (req, res) => {
         }
       }
 
+      result.findings = normalizeFindingsForReporting(result.findings || []);
       findings.push(...(result.findings || []));
     }
 
     const findingsDeduplicadosBase = deduplicarFindings(findings);
     const correlacion = correlacionarFindings(findingsDeduplicadosBase, toolResults);
-    const findingsDeduplicados = correlacion.findings;
+    const findingsDeduplicados = normalizeFindingsForReporting(correlacion.findings);
     const grupos = agruparFindings(findingsDeduplicados);
     const findingsInforme = [
-      ...grupos.confirmadas,
-      ...grupos.posibles
+      ...grupos.confirmed,
+      ...grupos.possible
     ];
     const summaryUi = construirResumenUI(grupos);
 
@@ -413,6 +409,7 @@ app.post('/analizar', async (req, res) => {
       ])
     );
     const pipelineTimeline = construirPipelineTimeline(serializedToolResults, toolCounters, correlacion.correlations, risk);
+    const dashboardMetrics = buildDashboardMetrics(findingsDeduplicados, serializedToolResults);
 
     enviar({ type: 'progress', tool: 'correlacion', status: 'success', message: `${correlacion.correlations.length} relaciones detectadas` });
     enviar({ type: 'progress', tool: 'score final', status: risk.risk_score === null ? 'skipped' : 'success', message: etiquetaRiesgo(risk) });
@@ -424,6 +421,7 @@ app.post('/analizar', async (req, res) => {
       findings: findingsDeduplicados,
       findings_reportables: findingsInforme,
       groups: grupos,
+      dashboard_metrics: dashboardMetrics,
       gf_candidates: construirCandidatosGf(toolResults),
       tool_results: serializedToolResults,
       tool_counters: toolCounters,
@@ -437,7 +435,7 @@ app.post('/analizar', async (req, res) => {
         ? 'La IA no respondió, se muestra análisis técnico básico.'
         : null,
       summary_ui: summaryUi,
-      summary: resumenSeveridad(findingsInforme)
+      summary: dashboardMetrics.severityDistribution.reportable
     };
 
     console.log('\n========== ANALISIS POR HERRAMIENTAS ==========');
@@ -578,6 +576,8 @@ app.post('/analizar-stream', async (req, res) => {
         scanLogger.variable(`result.findings.${tool}`, result.findings);
       }
 
+      result.findings = normalizeFindingsForReporting(result.findings || []);
+      scanLogger.variable(`result.findings.normalized.${tool}`, result.findings);
       findings.push(...(result.findings || []));
     }
 
@@ -588,13 +588,13 @@ app.post('/analizar-stream', async (req, res) => {
     scanLogger.variable('findingsDeduplicadosBase', findingsDeduplicadosBase);
     const correlacion = correlacionarFindings(findingsDeduplicadosBase, toolResults);
     scanLogger.variable('correlacion', correlacion);
-    const findingsDeduplicados = correlacion.findings;
+    const findingsDeduplicados = normalizeFindingsForReporting(correlacion.findings);
     const grupos = agruparFindings(findingsDeduplicados);
     scanLogger.variable('findingsDeduplicados', findingsDeduplicados);
     scanLogger.variable('grupos', grupos);
     const findingsInforme = [
-      ...grupos.confirmadas,
-      ...grupos.posibles
+      ...grupos.confirmed,
+      ...grupos.possible
     ];
     scanLogger.variable('findingsInforme', findingsInforme);
     const summaryUi = construirResumenUI(grupos);
@@ -612,6 +612,8 @@ app.post('/analizar-stream', async (req, res) => {
     scanLogger.variable('serializedToolResults', serializedToolResults);
     const pipelineTimeline = construirPipelineTimeline(serializedToolResults, toolCounters, correlacion.correlations, risk);
     scanLogger.variable('pipelineTimeline', pipelineTimeline);
+    const dashboardMetrics = buildDashboardMetrics(findingsDeduplicados, serializedToolResults);
+    scanLogger.variable('dashboardMetrics', dashboardMetrics);
 
 
     const respuesta = {
@@ -620,6 +622,7 @@ app.post('/analizar-stream', async (req, res) => {
       findings: findingsDeduplicados,
       findings_reportables: findingsInforme,
       groups: grupos,
+      dashboard_metrics: dashboardMetrics,
       gf_candidates: construirCandidatosGf(toolResults),
       tool_results: serializedToolResults,
       tool_counters: toolCounters,
@@ -633,7 +636,7 @@ app.post('/analizar-stream', async (req, res) => {
         ? 'La IA no respondio, se muestra analisis tecnico basico.'
         : null,
       summary_ui: summaryUi,
-      summary: resumenSeveridad(findingsInforme)
+      summary: dashboardMetrics.severityDistribution.reportable
     };
 
     scanLogger.variable('respuesta', respuesta);
@@ -661,18 +664,21 @@ app.post('/generar-informe', async (req, res) => {
       return res.status(400).json({ error: 'Debes enviar un array de findings.' });
     }
 
-    const findings = normalizarFindings(req.body.findings, 'otra', target.trim());
-    const informe = await generarInformeDesdeFindings(target.trim(), findings, {
+    const findings = normalizeFindingsForReporting(
+      clasificarFindings(normalizarFindings(req.body.findings, 'otra', target.trim()))
+    );
+    generarPdfDesdeDatos(res, target.trim(), findings, {
       gfCandidates: req.body.gf_candidates || {},
       toolResults: req.body.tool_results || {},
+      toolCounters: req.body.tool_counters || {},
       correlations: req.body.correlations || [],
       pipelineTimeline: req.body.pipeline_timeline || [],
       risk_score: req.body.risk_score,
       risk_level: req.body.risk_level,
-      risk_grade: req.body.risk_grade
+      risk_grade: req.body.risk_grade,
+      sqlmap_notice: req.body.sqlmap_notice,
+      ai_notice: req.body.ai_notice
     });
-
-    generarPdfDesdeInforme(res, target.trim(), informe);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

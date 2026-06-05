@@ -187,7 +187,9 @@ sudo apt install -y nmap
 
 GF solo prioriza candidatos por patron; no confirma vulnerabilidades. Del mismo modo, la ausencia de cabeceras HTTP o flags de cookies se reporta como hardening/configuracion y no debe interpretarse como XSS/SQLi confirmado.
 
-Por defecto, Nuclei excluye resultados informativos y tags ruidosos como `dns`, `tech`, `waf`, `cdn` y `favicon`. Para incluir severidad `info` en modo avanzado sin tratarla como vulnerabilidad:
+Por defecto, Nuclei se ejecuta sobre activos HTTP vivos, usando las templates oficiales instaladas localmente. La configuracion es conservadora para TFM: severidades `critical,high,medium,low`, salida JSONL, sin color, y exclusion de tags ruidosos como `dns`, `tech`, `waf`, `cdn` y `favicon`. Esto evita que `tech-detect`, `waf-detect`, favicon o CDN se cuenten como vulnerabilidades. Nuclei complementa a Dalfox, SQLMap y TruffleHog; un resultado 0 significa que no hubo matches en las templates ejecutadas, no ausencia total de vulnerabilidades.
+
+Para incluir severidad `info` en modo avanzado sin tratarla como vulnerabilidad:
 
 ```bash
 NUCLEI_INCLUDE_INFO=true node server.js
@@ -202,8 +204,23 @@ SQLMAP_CRAWL_IF_NO_PARAMS=true node server.js
 Limites configurables para mantener el analisis acotado:
 
 ```bash
-MAX_GAU_URLS=500
+NUCLEI_TEMPLATES_PATH=
+NUCLEI_SEVERITIES=critical,high,medium,low
+NUCLEI_INCLUDE_INFO=false
+NUCLEI_TAGS=
+NUCLEI_RATE_LIMIT=
+NUCLEI_TIMEOUT_SECONDS=
+FEROX_WORDLIST=
+FEROX_DEPTH=1
+FEROX_TIME_LIMIT_SECONDS=60
+FEROX_THREADS=10
+MAX_FEROX_TARGETS=5
 MAX_FEROX_URLS=100
+MAX_GAU_PARAM_URLS=100
+MAX_GAU_SURFACE_URLS=100
+MAX_GAU_TOTAL_AFTER_FILTER=300
+MAX_GAU_PER_PATTERN=3
+GAU_FILTER_EXTERNAL=true
 MAX_DALFOX_URLS=50
 MAX_SQLMAP_URLS=10
 MAX_JS_SECRET_SCAN=20
@@ -213,6 +230,10 @@ MAX_PASSIVE_TARGETS=20
 PASSIVE_PORTS=80,443,8080,8443,8000,3000,5000,5432,3306,6379,9200,27017,22,21,25
 PORT_SCAN_TIMEOUT_MS=800
 ```
+
+GAU ya no aplica un corte bruto temprano. Primero parsea todas las URLs historicas devueltas, descarta ruido externo/assets/trackers, deduplica por `origin + path + nombres de parametros + extension`, puntua endpoints utiles y solo despues limita por categoria. Las metricas distinguen URLs raw, validas, externas descartadas, assets descartados, duplicados/patrones descartados, URLs con parametros y seleccion final enviada a GF.
+
+Feroxbuster registra binario, argumentos reales, wordlist usada, existencia de la wordlist, activos enviados, lineas raw, parseados JSONL y descartes por assets o status. Si no hay wordlist configurada intenta usar `common.txt` de SecLists/dirb cuando exista; si no, continua con warning claro. Una ruta interesante se reporta como superficie; exposiciones sensibles con HTTP 200, como `/.env`, `/.git`, backups o dumps SQL, se tratan como posibles vulnerabilidades para validacion.
 
 ---
 

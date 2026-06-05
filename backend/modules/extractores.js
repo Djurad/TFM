@@ -73,6 +73,41 @@ function normalizarUrlSuperficie(url = '') {
 
 function parsearNucleiLinea(linea, index, target) {
   const limpia = String(linea || '').trim();
+  try {
+    const item = JSON.parse(limpia);
+    const info = item.info || {};
+    const id = item['template-id'] || item.templateID || item.template_id || item.id || `template-${index + 1}`;
+    const severity = String(info.severity || item.severity || 'info').toLowerCase();
+    const tags = Array.isArray(info.tags)
+      ? info.tags
+      : String(info.tags || '').split(',').map(tag => tag.trim()).filter(Boolean);
+    const matched = item['matched-at'] || item.matched || item.host || item.url || target;
+
+    return {
+      id: `nuclei-${id}-${index + 1}`,
+      tool: 'nuclei',
+      templateID: id,
+      template_id: id,
+      tags,
+      type: severity === 'info' ? 'reconocimiento' : 'vulnerability',
+      title: info.name || id.replace(/[-_]/g, ' '),
+      description: info.description || `Nuclei detecto el hallazgo ${id}.`,
+      severity,
+      confidence: severity === 'info' ? 'low' : ['high', 'critical'].includes(severity) ? 'high' : 'medium',
+      cvss: info.classification?.['cvss-score'] || null,
+      cwe: info.classification?.cwe || null,
+      affected_asset: item.host || target,
+      affected_url: matched,
+      evidence: limpia,
+      impact: info.impact || '',
+      recommendation: info.remediation || '',
+      false_positive_risk: severity === 'info' ? 'medium' : 'low',
+      raw_reference: limpia
+    };
+  } catch {
+    // Compatibilidad con la salida historica de Nuclei en texto.
+  }
+
   const match = limpia.match(/\[([^\]]+)\]\s+\[([^\]]+)\]\s+\[([^\]]+)\]\s+(\S+)/);
 
   if (!match) return null;
@@ -882,44 +917,47 @@ function findingsGf(toolResult, target) {
   return normalizarFindings(findings.slice(0, 60), 'gf', target);
 }
 
-function esExposicionFerox(url = '') {
+function esExposicionFerox(url = '', status = null) {
+  if (!(Number(status) >= 200 && Number(status) < 300)) return false;
   const lower = String(url).toLowerCase();
   return lower.includes('/.env') ||
     lower.includes('/.git') ||
+    lower.includes('/backup') ||
     lower.includes('backup.zip') ||
     lower.includes('config.php') ||
+    lower.includes('db.sql') ||
     lower.includes('database.sql') ||
     lower.includes('dump.sql') ||
-    /\.(zip|tar|tgz|tar\.gz|7z|rar|bak|backup|sql)(\?|$)/i.test(lower);
+    /\.(zip|tar|tgz|tar\.gz|7z|rar|bak|backup|sql|env|conf|ini)(\?|$)/i.test(lower);
 }
 
 function findingsFeroxbuster(toolResult, target) {
   const endpoints = Array.isArray(toolResult.parsed) ? toolResult.parsed : [];
-  const interesantes = endpoints.filter(endpoint => endpoint.category === 'suspicious' || esExposicionFerox(endpoint.url));
+  const interesantes = endpoints.filter(endpoint => endpoint.category === 'suspicious' || esExposicionFerox(endpoint.url, endpoint.status));
 
   return normalizarFindings(
     interesantes
       .slice(0, 30)
       .map((endpoint, index) => ({
-        id: esExposicionFerox(endpoint.url)
+        id: esExposicionFerox(endpoint.url, endpoint.status)
           ? `feroxbuster-exposure-${index + 1}`
           : `feroxbuster-surface-${index + 1}`,
         tool: 'feroxbuster',
-        type: esExposicionFerox(endpoint.url) ? 'vulnerability' : 'surface',
-        exposure: esExposicionFerox(endpoint.url),
+        type: esExposicionFerox(endpoint.url, endpoint.status) ? 'vulnerability' : 'surface',
+        exposure: esExposicionFerox(endpoint.url, endpoint.status),
         title: endpoint.url.includes('/.env')
           ? 'Posible archivo .env expuesto'
           : endpoint.url.includes('/.git')
             ? 'Posible repositorio .git expuesto'
-            : esExposicionFerox(endpoint.url)
+            : esExposicionFerox(endpoint.url, endpoint.status)
               ? 'Posible archivo sensible expuesto'
               : 'Ruta sensible descubierta por Feroxbuster',
-        description: esExposicionFerox(endpoint.url)
+        description: esExposicionFerox(endpoint.url, endpoint.status)
           ? 'Feroxbuster descubrio una ruta sensible accesible que requiere validacion manual.'
           : 'Feroxbuster descubrio superficie sensible. No es una vulnerabilidad confirmada.',
-        severity: esExposicionFerox(endpoint.url) ? 'medium' : 'low',
-        confidence: esExposicionFerox(endpoint.url) ? 'medium' : 'low',
-        isVulnerability: esExposicionFerox(endpoint.url),
+        severity: esExposicionFerox(endpoint.url, endpoint.status) ? 'medium' : 'low',
+        confidence: esExposicionFerox(endpoint.url, endpoint.status) ? 'medium' : 'low',
+        isVulnerability: esExposicionFerox(endpoint.url, endpoint.status),
         affected_asset: target,
         affected_url: endpoint.url,
         evidence: [
@@ -927,7 +965,7 @@ function findingsFeroxbuster(toolResult, target) {
           endpoint.status ? `Status: ${endpoint.status}` : null,
           endpoint.contentLength ? `Content-Length: ${endpoint.contentLength}` : null
         ].filter(Boolean).join('\n'),
-        recommendation: esExposicionFerox(endpoint.url)
+        recommendation: esExposicionFerox(endpoint.url, endpoint.status)
           ? 'Restringir el acceso publico a archivos sensibles, backups, configuraciones o repositorios internos.'
           : 'Revisar manualmente si este endpoint requiere controles adicionales.',
         raw_reference: JSON.stringify(endpoint).slice(0, 1200)

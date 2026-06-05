@@ -239,7 +239,7 @@ function clasificarFinding(raw = {}) {
   }
 
   if (tool === 'feroxbuster') {
-    if (raw.exposure === true || texto.includes('/.env') || texto.includes('/.git') || texto.includes('backup') || texto.includes('config')) {
+    if (raw.exposure === true) {
       type = 'vulnerability';
       severity = 'medium';
       confidence = 'medium';

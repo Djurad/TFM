@@ -359,6 +359,112 @@ function deduplicarUrls(urls) {
   return Array.from(new Set((urls || []).filter(Boolean).map(url => String(url).trim()).filter(Boolean)));
 }
 
+function normalizarInputHttpxItem(valor = '', preferirUrl = false) {
+  const raw = String(valor || '').trim();
+  if (!raw) return null;
+
+  if (/^https?:\/\//i.test(raw)) {
+    try {
+      const parsed = new URL(raw);
+      parsed.hash = '';
+      const base = `${parsed.protocol}//${parsed.host}`;
+      const input = (parsed.pathname && parsed.pathname !== '/') || parsed.search
+        ? `${parsed.origin}${parsed.pathname}${parsed.search}`.replace(/\/$/, '')
+        : base;
+      return {
+        input,
+        key: `${parsed.hostname.toLowerCase()}:${parsed.port || ''}`,
+        preferirUrl
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  const limpio = limpiarTarget(raw);
+  if (!limpio) return null;
+
+  try {
+    const parsed = new URL(`http://${limpio}`);
+    return {
+      input: limpio,
+      key: `${parsed.hostname.toLowerCase()}:${parsed.port || ''}`,
+      preferirUrl
+    };
+  } catch {
+    return {
+      input: limpio,
+      key: limpio.toLowerCase(),
+      preferirUrl
+    };
+  }
+}
+
+function construirInputHttpx(entrada = {}, subdominios = []) {
+  const originalConProtocolo = /^https?:\/\//i.test(String(entrada.original || ''));
+  const candidatos = [
+    entrada.original,
+    entrada.inputUrl,
+    entrada.baseUrl,
+    ...(subdominios || [])
+  ];
+  const porHost = new Map();
+
+  candidatos.forEach(valor => {
+    const item = normalizarInputHttpxItem(valor, originalConProtocolo);
+    if (!item) return;
+    const existente = porHost.get(item.key);
+    if (!existente || (item.preferirUrl && !existente.preferirUrl)) {
+      porHost.set(item.key, item);
+    }
+  });
+
+  return Array.from(porHost.values()).map(item => item.input);
+}
+
+function normalizarClaveHttpx(item = {}) {
+  const candidate = item.finalUrl || item.final_url || item.url || item.input || '';
+  try {
+    const parsed = new URL(candidate);
+    parsed.hash = '';
+    return `${parsed.protocol}//${parsed.host}${parsed.pathname.replace(/\/$/, '') || '/'}${parsed.search}`.toLowerCase();
+  } catch {
+    return String(candidate || '').trim().replace(/\/$/, '').toLowerCase();
+  }
+}
+
+function deduplicarHttpxResultados(resultados = []) {
+  const mapa = new Map();
+  const duplicados = [];
+
+  resultados.filter(Boolean).forEach(item => {
+    const key = normalizarClaveHttpx(item);
+    if (!key) return;
+    if (!mapa.has(key)) {
+      mapa.set(key, {
+        ...item,
+        inputs: [item.input || item.url].filter(Boolean)
+      });
+      return;
+    }
+
+    const existente = mapa.get(key);
+    existente.inputs = deduplicarUrls([...(existente.inputs || []), item.input || item.url]);
+    existente.duplicateInputs = deduplicarUrls([...(existente.duplicateInputs || []), item.input || item.url]);
+    duplicados.push(item);
+  });
+
+  return {
+    unique: Array.from(mapa.values()),
+    duplicates: duplicados,
+    metrics: {
+      respuestas_httpx: resultados.length,
+      activos_vivos: mapa.size,
+      duplicados_httpx: duplicados.length
+    }
+  };
+}
+
 function normalizarClaveUrl(url) {
   try {
     const parsed = new URL(url);
@@ -396,6 +502,36 @@ function deduplicarEndpoints(endpoints = []) {
 
 function limitarUrls(urls = [], max) {
   return deduplicarPorPatron(ordenarPorPrioridad(urls.filter(Boolean))).slice(0, max);
+}
+
+function esUrlPrioritariaDalfox(url = '') {
+  try {
+    const parsed = new URL(url);
+    const params = Array.from(parsed.searchParams.keys()).map(param => param.toLowerCase());
+    const path = parsed.pathname.toLowerCase();
+    return params.includes('hostname') ||
+      params.includes('host') ||
+      path.includes('serverstatuscheckservice') ||
+      path.includes('status_check');
+  } catch {
+    return /hostname|serverstatuscheckservice|status_check/i.test(String(url || ''));
+  }
+}
+
+function asegurarUrlsPrioritariasDalfox(seleccionadas = [], candidatas = [], max = 50) {
+  const seleccion = deduplicarUrls(seleccionadas);
+  const prioritarias = deduplicarUrls(candidatas).filter(esUrlPrioritariaDalfox);
+
+  prioritarias.forEach(url => {
+    if (seleccion.includes(url)) return;
+    if (seleccion.length < max) {
+      seleccion.push(url);
+      return;
+    }
+    seleccion[seleccion.length - 1] = url;
+  });
+
+  return deduplicarUrls(seleccion);
 }
 
 function buscarHttpInfo(url, httpx = []) {
@@ -455,6 +591,24 @@ function registrarPaso(nombre, mensaje, extra = {}) {
 function contarDescartadosNuclei(lineas = []) {
   return lineas.filter(linea => {
     const lower = String(linea).toLowerCase();
+    try {
+      const item = JSON.parse(linea);
+      const severity = String(item.info?.severity || item.severity || '').toLowerCase();
+      const tags = Array.isArray(item.info?.tags)
+        ? item.info.tags.join(',')
+        : String(item.info?.tags || '');
+      const template = String(item['template-id'] || item.templateID || item.template_id || '');
+      const texto = `${severity} ${tags} ${template}`.toLowerCase();
+      return severity === 'info' ||
+        texto.includes('waf') ||
+        texto.includes('wildcard-dns') ||
+        texto.includes('tech') ||
+        texto.includes('favicon') ||
+        texto.includes('cdn');
+    } catch {
+      // Se mantiene el conteo para salida de texto.
+    }
+
     return lower.includes('[info]') ||
       lower.includes('waf-detect') ||
       lower.includes('wildcard-dns-detect') ||
@@ -462,6 +616,45 @@ function contarDescartadosNuclei(lineas = []) {
       lower.includes('favicon') ||
       lower.includes('cdn');
   }).length;
+}
+
+function parsearNucleiJsonl(output = '') {
+  return parsearLineas(output).map(linea => {
+    try {
+      const item = JSON.parse(linea);
+      return JSON.stringify(item);
+    } catch {
+      return linea;
+    }
+  });
+}
+
+function construirArgsNuclei() {
+  const includeInfo = process.env.NUCLEI_INCLUDE_INFO === 'true';
+  const severidades = process.env.NUCLEI_SEVERITIES ||
+    (includeInfo ? 'info,low,medium,high,critical' : 'critical,high,medium,low');
+  const args = ['-jsonl', '-silent', '-no-color', '-severity', severidades];
+  const templatesPath = process.env.NUCLEI_TEMPLATES_PATH;
+  const tags = process.env.NUCLEI_TAGS;
+  const rateLimit = process.env.NUCLEI_RATE_LIMIT;
+  const timeoutSeconds = process.env.NUCLEI_TIMEOUT_SECONDS;
+
+  if (templatesPath) args.push('-t', templatesPath);
+  if (tags) args.push('-tags', tags);
+  if (!includeInfo) args.push('-exclude-tags', 'dns,tech,waf,cdn,favicon');
+  if (rateLimit) args.push('-rl', rateLimit);
+  if (timeoutSeconds) args.push('-timeout', timeoutSeconds);
+
+  return {
+    args,
+    severidades,
+    includeInfo,
+    templatesPath: templatesPath || 'templates oficiales instaladas localmente',
+    tags: tags || '',
+    excludeTags: includeInfo ? '' : 'dns,tech,waf,cdn,favicon',
+    rateLimit: rateLimit || '',
+    timeoutSeconds: timeoutSeconds || ''
+  };
 }
 
 async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
@@ -476,16 +669,6 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
   const entrada = normalizarEntrada(targetOriginal);
   let target = entrada.domain;
 
-  if (target === 'juice-shop.github.io') {
-    registrarPaso('normalizacion', 'juice-shop.github.io apunta a documentacion estatica; se usa la app vulnerable publica.', {
-      original: target,
-      normalizado: 'demo.owasp-juice.shop'
-    });
-    target = 'demo.owasp-juice.shop';
-    entrada.baseUrl = 'https://demo.owasp-juice.shop';
-    entrada.inputUrl = 'https://demo.owasp-juice.shop';
-  }
-
   if (!validarTarget(target)) {
     throw new Error('Target no valido. Usa un dominio, por ejemplo: testphp.vulnweb.com');
   }
@@ -498,7 +681,6 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
   const includeNucleiInfo = process.env.NUCLEI_INCLUDE_INFO === 'true';
   const sqlmapCrawlIfNoParams = process.env.SQLMAP_CRAWL_IF_NO_PARAMS === 'true';
   const timeoutMs = Number(process.env.TOOL_TIMEOUT_SECONDS || 120) * 1000;
-  const maxGauUrls = Number(process.env.MAX_GAU_URLS || 500);
   const maxFeroxUrls = Number(process.env.MAX_FEROX_URLS || 100);
   const maxDalfoxUrls = Number(process.env.MAX_DALFOX_URLS || 50);
   const maxSqlmapUrls = Number(process.env.MAX_SQLMAP_URLS || 10);
@@ -568,6 +750,7 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
         status: 'success',
         raw,
         parsed,
+        parsed_count: parsedCount,
         findings: []
       };
       logVar(`toolResults.${nombre}`, toolResults[nombre]);
@@ -579,6 +762,7 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
         status: 'error',
         raw: '',
         parsed: [],
+        parsed_count: 0,
         findings: [],
         error: error.message
       };
@@ -595,8 +779,15 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
     const rawPorUrl = {};
     const parsedPorUrl = {};
     const inputPorUrl = {};
+    const rawIntentosPorUrl = {};
+    const parsedIntentosPorUrl = {};
+    const argsPorUrl = {};
+    const timeoutPorUrl = {};
     const parsedTotal = [];
     let errores = 0;
+    let reintentos = 0;
+    const maxReintentos = Number(process.env.DALFOX_RETRIES || 1);
+    const dalfoxArgs = ['pipe', '--silence', '--format', 'json'];
 
     if (urlsValidas.length === 0) {
       const skipped = {
@@ -609,7 +800,8 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
           urls_analizadas: 0,
           hallazgos: 0,
           confirmadas: 0,
-          errores: 0
+          errores: 0,
+          reintentos: 0
         }
       };
       logVar('toolResults.dalfox', skipped);
@@ -621,34 +813,66 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
     for (const url of urlsValidas) {
       const input = `${url}\n`;
       inputPorUrl[url] = input;
+      argsPorUrl[url] = dalfoxArgs;
+      timeoutPorUrl[url] = timeoutMs;
       logVar(`dalfox.inputPorUrl.${url}`, input);
+      logVar(`dalfox.binarioPorUrl.${url}`, 'dalfox');
+      logVar(`dalfox.argsPorUrl.${url}`, dalfoxArgs);
+      logVar(`dalfox.timeoutPorUrl.${url}`, timeoutMs);
 
-      try {
-        registrarPaso('dalfox', 'ejecutando URL individual', { entrada: url });
-        const raw = await ejecutarConInput(
-          'dalfox',
-          ['pipe', '--silence', '--format', 'json'],
-          input,
-          {
-            timeout: timeoutMs,
-            permitirFalloSinSalida: true
+      for (let intento = 0; intento <= maxReintentos; intento += 1) {
+        try {
+          if (intento > 0) reintentos += 1;
+          registrarPaso('dalfox', 'ejecutando URL individual', {
+            entrada: url,
+            intento: intento + 1,
+            maxIntentos: maxReintentos + 1,
+            args: dalfoxArgs,
+            timeoutMs
+          });
+          const raw = await ejecutarConInput(
+            'dalfox',
+            dalfoxArgs,
+            input,
+            {
+              timeout: timeoutMs,
+              permitirFalloSinSalida: true
+            }
+          );
+          const parsed = parsearDalfox(raw);
+
+          rawIntentosPorUrl[url] = rawIntentosPorUrl[url] || [];
+          parsedIntentosPorUrl[url] = parsedIntentosPorUrl[url] || [];
+          rawIntentosPorUrl[url].push(raw);
+          parsedIntentosPorUrl[url].push(parsed);
+          rawPorUrl[url] = raw;
+          parsedPorUrl[url] = parsed;
+          logVar(`dalfox.rawPorUrl.${url}.intento${intento + 1}`, raw);
+          logVar(`dalfox.parsedPorUrl.${url}.intento${intento + 1}`, parsed);
+
+          if (parsed.length > 0) {
+            parsedTotal.push(...parsed);
+            break;
           }
-        );
-        const parsed = parsearDalfox(raw);
 
-        rawPorUrl[url] = raw;
-        parsedPorUrl[url] = parsed;
-        logVar(`dalfox.rawPorUrl.${url}`, raw);
-        logVar(`dalfox.parsedPorUrl.${url}`, parsed);
-
-        if (parsed.length > 0) parsedTotal.push(...parsed);
-      } catch (error) {
-        errores += 1;
-        rawPorUrl[url] = '';
-        parsedPorUrl[url] = [];
-        logVar(`dalfox.errorPorUrl.${url}`, error.message);
-        console.error(`Error en dalfox para ${url}:`, error.message);
+          if (intento >= maxReintentos) break;
+          registrarPaso('dalfox', 'sin hallazgos en intento; reintentando URL individual', {
+            entrada: url,
+            rawLength: raw.length,
+            parsed: parsed.length
+          });
+        } catch (error) {
+          errores += 1;
+          rawPorUrl[url] = rawPorUrl[url] || '';
+          parsedPorUrl[url] = parsedPorUrl[url] || [];
+          logVar(`dalfox.errorPorUrl.${url}.intento${intento + 1}`, error.message);
+          console.error(`Error en dalfox para ${url}:`, error.message);
+          break;
+        }
       }
+
+      logVar(`dalfox.rawPorUrl.${url}`, rawPorUrl[url] || '');
+      logVar(`dalfox.parsedPorUrl.${url}`, parsedPorUrl[url] || []);
     }
 
     const result = {
@@ -661,14 +885,22 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
         urls_analizadas: urlsValidas.length,
         hallazgos: parsedTotal.length,
         confirmadas: parsedTotal.filter(item => String(item.type || '').toUpperCase() === 'V').length,
-        errores
+        errores,
+        reintentos,
+        max_reintentos_por_url: maxReintentos,
+        comando: 'dalfox pipe --silence --format json',
+        timeout_ms: timeoutMs
       }
     };
 
     result.findings = extraerFindingsDeterministas('dalfox', result, target);
     logVar('dalfox.inputPorUrl', inputPorUrl);
+    logVar('dalfox.argsPorUrl', argsPorUrl);
+    logVar('dalfox.timeoutPorUrl', timeoutPorUrl);
     logVar('dalfox.rawPorUrl', rawPorUrl);
+    logVar('dalfox.rawIntentosPorUrl', rawIntentosPorUrl);
     logVar('dalfox.parsedPorUrl', parsedPorUrl);
+    logVar('dalfox.parsedIntentosPorUrl', parsedIntentosPorUrl);
     logVar('dalfox.findingsFinales', result.findings);
     logVar('toolResults.dalfox', result);
 
@@ -735,8 +967,14 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
   subdominios = deduplicarUrls([...subdominios, target]);
   logVar('subdominios', subdominios);
 
-  const inputHttpx = deduplicarUrls([...subdominios, entrada.inputUrl, entrada.baseUrl]).join('\n');
+  const inputHttpxItems = construirInputHttpx(entrada, subdominios);
+  const inputHttpx = inputHttpxItems.join('\n');
+  logVar('inputHttpxItems', inputHttpxItems);
   logVar('inputHttpx', inputHttpx);
+  registrarPaso('httpx', 'entradas normalizadas', {
+    entradas: inputHttpxItems.length,
+    originales: deduplicarUrls([...subdominios, entrada.inputUrl, entrada.baseUrl]).length
+  });
 
   const httpxOutput = await ejecutarHerramientaInput(
     'httpx',
@@ -746,7 +984,9 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
     parsearHttpxJson
   );
 
-  let httpx = parsearHttpxJson(httpxOutput);
+  let httpxRespuestas = parsearHttpxJson(httpxOutput);
+  let httpxDedup = deduplicarHttpxResultados(httpxRespuestas);
+  let httpx = httpxDedup.unique;
   const httpxFallbackUrls = httpx.length === 0
     ? deduplicarUrls([entrada.baseUrl, entrada.inputUrl].filter(url => /^https?:\/\//i.test(String(url || ''))))
     : [];
@@ -773,7 +1013,10 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
       toolResults.httpx.parsed_count = httpx.length;
       toolResults.httpx.metrics = {
         ...(toolResults.httpx.metrics || {}),
+        respuestas_httpx: 0,
         activos_vivos: httpx.length,
+        duplicados_httpx: 0,
+        entradas_httpx: inputHttpxItems.length,
         fallback: true
       };
     }
@@ -781,7 +1024,25 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
     logVar('toolResults.httpx', toolResults.httpx);
   }
   logVar('httpxOutput', httpxOutput);
+  logVar('httpxRespuestas', httpxRespuestas);
+  logVar('httpxDuplicados', httpxDedup.duplicates);
   logVar('httpx', httpx);
+  if (toolResults.httpx && !toolResults.httpx.metrics?.fallback) {
+    toolResults.httpx.parsed = httpx;
+    toolResults.httpx.parsed_count = httpx.length;
+    toolResults.httpx.metrics = {
+      ...(toolResults.httpx.metrics || {}),
+      entradas_httpx: inputHttpxItems.length,
+      ...httpxDedup.metrics
+    };
+    logVar('toolResults.httpx', toolResults.httpx);
+  }
+  registrarPaso('httpx', 'deduplicacion completada', {
+    entradas: inputHttpxItems.length,
+    respuestas: httpxDedup.metrics.respuestas_httpx,
+    activosUnicos: httpxDedup.metrics.activos_vivos,
+    duplicados: httpxDedup.metrics.duplicados_httpx
+  });
   const activos = deduplicarUrls(httpx.map(item => item.finalUrl || item.url).filter(Boolean));
   logVar('activos', activos);
   const inputKatana = activos.join('\n');
@@ -876,12 +1137,20 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
         error: 'gau no aplica a targets locales o direcciones IP',
         metrics: {
           endpoints_encontrados: 0,
+          raw_urls: 0,
+          urls_validas: 0,
+          urls_externas_descartadas: 0,
+          assets_descartados: 0,
+          duplicados_descartados: 0,
+          patrones_deduplicados: 0,
           con_parametros: 0,
+          seleccionadas_final: 0,
+          enviadas_gf: 0,
           enviados_ia: 0,
           raw_length: 0
         }
       }
-    : await ejecutarGau(target, { maxUrls: maxGauUrls, timeoutMs });
+    : await ejecutarGau(target, { timeoutMs });
   logVar('gauResult', gauResult);
   toolResults.gau = gauResult;
   logVar('toolResults.gau', toolResults.gau);
@@ -955,19 +1224,25 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
   logVar('sqliDesdeGf', sqliDesdeGf);
 
   const inputNuclei = activos.join('\n');
-  const severidadesNuclei = includeNucleiInfo ? 'info,low,medium,high,critical' : 'low,medium,high,critical';
-  const excludeTags = 'dns,tech,waf,cdn,favicon';
+  const nucleiConfig = construirArgsNuclei();
   logVar('inputNuclei', inputNuclei);
-  logVar('severidadesNuclei', severidadesNuclei);
-  logVar('excludeTags', excludeTags);
+  logVar('nucleiConfig', nucleiConfig);
+  registrarPaso('nuclei', 'configuracion efectiva', {
+    targets: activos.length,
+    templatesPath: nucleiConfig.templatesPath,
+    severidades: nucleiConfig.severidades,
+    tags: nucleiConfig.tags,
+    excludeTags: nucleiConfig.excludeTags,
+    includeInfo: nucleiConfig.includeInfo
+  });
 
   const nucleiOutput = activos.length > 0
     ? await ejecutarHerramientaInput(
         'nuclei',
         'nuclei',
-        ['-severity', severidadesNuclei, '-exclude-tags', excludeTags, '-silent', '-no-color'],
+        nucleiConfig.args,
         inputNuclei,
-        parsearLineas,
+        parsearNucleiJsonl,
         { permitirFalloSinSalida: true }
       )
     : '';
@@ -983,7 +1258,31 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
     logVar('toolResults.nuclei', toolResults.nuclei);
   }
 
-  const vulnerabilidades = parsearLineas(nucleiOutput);
+  if (toolResults.nuclei) {
+    const parsedNuclei = Array.isArray(toolResults.nuclei.parsed)
+      ? toolResults.nuclei.parsed
+      : parsearNucleiJsonl(nucleiOutput);
+    toolResults.nuclei.parsed = parsedNuclei;
+    toolResults.nuclei.parsed_count = parsedNuclei.length;
+    toolResults.nuclei.metrics = {
+      ...(toolResults.nuclei.metrics || {}),
+      targets: activos.length,
+      raw_lineas: parsearLineas(nucleiOutput).length,
+      parsed_findings: parsedNuclei.length,
+      templates_path: nucleiConfig.templatesPath,
+      severities: nucleiConfig.severidades,
+      tags: nucleiConfig.tags,
+      exclude_tags: nucleiConfig.excludeTags,
+      include_info: nucleiConfig.includeInfo,
+      rate_limit: nucleiConfig.rateLimit,
+      timeout_seconds: nucleiConfig.timeoutSeconds
+    };
+    logVar('toolResults.nuclei', toolResults.nuclei);
+  }
+
+  const vulnerabilidades = Array.isArray(toolResults.nuclei?.parsed)
+    ? toolResults.nuclei.parsed
+    : parsearNucleiJsonl(nucleiOutput);
   logVar('nucleiOutput', nucleiOutput);
   logVar('vulnerabilidades', vulnerabilidades);
   registrarPaso('nuclei', 'ruido informativo/fingerprinting descartado por configuracion o clasificador', {
@@ -991,10 +1290,16 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
     includeInfo: includeNucleiInfo
   });
 
-  const urlsDalfox = limitarUrls(
+  const urlsDalfoxBase = limitarUrls(
     xssDesdeGf.length ? xssDesdeGf : urlsParametrizadas,
     xssDesdeGf.length ? maxDalfoxUrls : Math.min(maxDalfoxUrls, 30)
   );
+  const urlsDalfox = asegurarUrlsPrioritariasDalfox(
+    urlsDalfoxBase,
+    xssDesdeGf.length ? xssDesdeGf : urlsParametrizadas,
+    xssDesdeGf.length ? maxDalfoxUrls : Math.min(maxDalfoxUrls, 30)
+  );
+  logVar('urlsDalfoxBase', urlsDalfoxBase);
   logVar('urlsDalfox', urlsDalfox);
 
   console.log(`[dalfox] URLs recibidas desde gf xss: ${xssDesdeGf.length}`);
@@ -1138,5 +1443,9 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
 module.exports = {
   ejecutarReconocimiento,
   normalizarUrlParaSqlmap,
-  parsearDalfox
+  parsearDalfox,
+  construirInputHttpx,
+  deduplicarHttpxResultados,
+  construirArgsNuclei,
+  parsearNucleiJsonl
 };

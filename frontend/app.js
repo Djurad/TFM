@@ -342,7 +342,11 @@ function obtenerDetalleHerramienta(tool, result, counter = {}) {
   if (tool === 'subfinder') return `${counter.subdominios_encontrados || result.parsed_count || 0} subdominios`;
   if (tool === 'httpx') {
     const parsedCount = Array.isArray(result.parsed) ? result.parsed.length : 0;
-    return `${counter.activos_vivos || result.metrics?.activos_vivos || result.parsed_count || parsedCount || 0} vivos`;
+    const activos = counter.activos_vivos || result.metrics?.activos_vivos || result.parsed_count || parsedCount || 0;
+    const respuestas = counter.respuestas_httpx || result.metrics?.respuestas_httpx || 0;
+    return respuestas > activos && activos > 0
+      ? `${respuestas} respuestas / ${activos} unico${activos === 1 ? '' : 's'}`
+      : `${activos} vivos`;
   }
   if (tool === 'headers') return `${counter.cabeceras_ausentes || 0} ausentes / ${counter.banners_expuestos || 0} banners`;
   if (tool === 'cookies') return `${counter.cookies_inseguras || 0} inseguras / ${counter.cookies_sesion || 0} sesion / ${counter.cookies_analizadas || 0} total`;
@@ -351,7 +355,11 @@ function obtenerDetalleHerramienta(tool, result, counter = {}) {
   if (tool === 'robotsSitemap') return `${counter.recursos_encontrados || 0} recursos / ${counter.rutas_sensibles || 0} sensibles`;
   if (tool === 'ports') return `${counter.puertos_abiertos || 0} abiertos / ${counter.puertos_datos || 0} datos${counter.source ? ` / ${counter.source}` : ''}`;
   if (tool === 'katana') return `${counter.endpoints_encontrados || result.parsed_count || 0} normalizados / ${counter.superficie_util || 0} superficie`;
-  if (tool === 'gau') return `${counter.endpoints_encontrados || result.parsed_count || 0} historicas / ${counter.con_parametros || 0} params`;
+  if (tool === 'gau') {
+    const raw = counter.raw_urls || result.metrics?.raw_urls || 0;
+    const selected = counter.seleccionadas_final || counter.endpoints_encontrados || result.parsed_count || 0;
+    return `${raw} analizadas / ${selected} seleccionadas / ${counter.con_parametros || 0} params`;
+  }
   if (tool === 'gf') return `${counter.xss || 0} XSS / ${counter.sqli || 0} SQLi / ${counter.ssrf || 0} SSRF / ${counter.redirect || 0} Redirect`;
   if (tool === 'feroxbuster') return `${counter.rutas_descubiertas || 0} rutas / ${counter.rutas_sensibles || 0} sensibles`;
   if (tool === 'trufflehog') return `${counter.secretos_confirmados || 0} confirmados / ${counter.secretos_posibles || 0} posibles / ${counter.recursos_fallidos || 0} fallidos`;
@@ -987,6 +995,7 @@ function getHttpxSummary(scanResult = {}, toolData = {}, timelineItem = {}) {
     : arrayDirectoHerramienta(scanResult, 'httpx');
   const countResponses = parsed.length;
   const metricAssets = Number(toolData.metrics?.activos_vivos || 0);
+  const metricResponses = Number(toolData.metrics?.respuestas_httpx || 0);
   const parsedCount = Number(toolData.parsed_count || 0);
   const uniqueAssets = new Set(
     parsed
@@ -994,6 +1003,9 @@ function getHttpxSummary(scanResult = {}, toolData = {}, timelineItem = {}) {
       .filter(Boolean)
   );
 
+  if (metricAssets > 0 && metricResponses > metricAssets) {
+    return `${metricResponses} respuestas / ${metricAssets} activo${metricAssets === 1 ? '' : 's'} vivo${metricAssets === 1 ? '' : 's'}`;
+  }
   if (uniqueAssets.size > 0 && countResponses > uniqueAssets.size) {
     return `${countResponses} respuestas / ${uniqueAssets.size} activo${uniqueAssets.size === 1 ? '' : 's'} vivo${uniqueAssets.size === 1 ? '' : 's'}`;
   }
@@ -1066,9 +1078,10 @@ function getToolSummary(toolKey, timelineItem = {}, scanResult = {}) {
   }
   if (toolKey === 'gau') {
     const parsedCount = Array.isArray(result.parsed) ? result.parsed.length : 0;
-    const urls = counter.endpoints_encontrados ?? result.metrics?.endpoints_encontrados ?? result.parsed_count ?? parsedCount;
+    const raw = counter.raw_urls ?? result.metrics?.raw_urls ?? 0;
+    const urls = counter.seleccionadas_final ?? result.metrics?.seleccionadas_final ?? counter.endpoints_encontrados ?? result.metrics?.endpoints_encontrados ?? result.parsed_count ?? parsedCount;
     const params = counter.con_parametros ?? result.metrics?.con_parametros ?? 0;
-    return `${urls} historicas / ${params} params`;
+    return `${raw} analizadas / ${urls} seleccionadas / ${params} params`;
   }
   if (toolKey === 'gf') {
     const xss = counter.xss ?? result.metrics?.xss ?? 0;

@@ -156,7 +156,13 @@ function construirPipelineTimeline(toolResults = {}, counters = {}, correlations
   const detalle = (tool, result = {}) => {
     const counter = counters[tool] || {};
     if (tool === 'subfinder') return `${counter.subdominios_encontrados || result.parsed_count || 0} subdominios`;
-    if (tool === 'httpx') return `${counter.activos_vivos || result.parsed_count || 0} vivos`;
+    if (tool === 'httpx') {
+      const activos = counter.activos_vivos || result.metrics?.activos_vivos || result.parsed_count || 0;
+      const respuestas = counter.respuestas_httpx || result.metrics?.respuestas_httpx || 0;
+      return respuestas > activos && activos > 0
+        ? `${respuestas} respuestas / ${activos} unico${activos === 1 ? '' : 's'}`
+        : `${activos} vivos`;
+    }
     if (tool === 'headers') return `${counter.cabeceras_ausentes || 0} ausentes / ${counter.banners_expuestos || 0} banners`;
     if (tool === 'cookies') return `${counter.cookies_inseguras || 0} inseguras / ${counter.cookies_sesion || 0} sesion`;
     if (tool === 'httpsRedirect') return `${counter.redirecciona_https || 0} HTTPS ok / ${counter.http_sin_redirect || 0} HTTP abierto`;
@@ -165,7 +171,11 @@ function construirPipelineTimeline(toolResults = {}, counters = {}, correlations
     if (tool === 'ports') return `${counter.puertos_abiertos || 0} abiertos${counter.source ? ` / ${counter.source}` : ''}`;
     if (tool === 'feroxbuster') return `${counter.rutas_descubiertas || 0} rutas / ${counter.rutas_sensibles || 0} sensibles`;
     if (tool === 'katana') return `${counter.endpoints_encontrados || result.parsed_count || 0} endpoints / ${counter.superficie_util || 0} superficie`;
-    if (tool === 'gau') return `${counter.endpoints_encontrados || result.parsed_count || 0} historicas / ${counter.con_parametros || 0} params`;
+    if (tool === 'gau') {
+      const raw = counter.raw_urls || result.metrics?.raw_urls || 0;
+      const selected = counter.seleccionadas_final || counter.endpoints_encontrados || result.parsed_count || 0;
+      return `${raw} analizadas / ${selected} seleccionadas / ${counter.con_parametros || 0} params`;
+    }
     if (tool === 'gf') return `${counter.xss || 0} XSS / ${counter.sqli || 0} SQLi / ${counter.ssrf || 0} SSRF`;
     if (tool === 'nuclei') return `${counter.vulnerabilidades_reales || 0} vulnerabilidades`;
     if (tool === 'dalfox') return `${(result.findings || []).length} hallazgos`;
@@ -219,7 +229,10 @@ function resumenHerramientas(reconocimiento, toolResults, findings) {
       subdominios_encontrados: reconocimiento.subdominios?.length || 0
     },
     httpx: {
-      activos_vivos: reconocimiento.activos?.length || 0
+      respuestas_httpx: toolResults.httpx?.metrics?.respuestas_httpx || toolResults.httpx?.parsed_count || 0,
+      activos_vivos: reconocimiento.activos?.length || toolResults.httpx?.metrics?.activos_vivos || 0,
+      duplicados_httpx: toolResults.httpx?.metrics?.duplicados_httpx || 0,
+      entradas_httpx: toolResults.httpx?.metrics?.entradas_httpx || 0
     },
     headers: {
       activos_analizados: toolResults.headers?.metrics?.activos_analizados || 0,
@@ -263,7 +276,16 @@ function resumenHerramientas(reconocimiento, toolResults, findings) {
     },
     gau: {
       endpoints_encontrados: toolResults.gau?.metrics?.endpoints_encontrados || toolResults.gau?.parsed?.length || 0,
-      con_parametros: toolResults.gau?.metrics?.con_parametros || 0
+      raw_urls: toolResults.gau?.metrics?.raw_urls || 0,
+      urls_validas: toolResults.gau?.metrics?.urls_validas || 0,
+      urls_externas_descartadas: toolResults.gau?.metrics?.urls_externas_descartadas || 0,
+      assets_descartados: toolResults.gau?.metrics?.assets_descartados || 0,
+      duplicados_descartados: toolResults.gau?.metrics?.duplicados_descartados || 0,
+      patrones_deduplicados: toolResults.gau?.metrics?.patrones_deduplicados || 0,
+      con_parametros: toolResults.gau?.metrics?.con_parametros || 0,
+      seleccionadas_final: toolResults.gau?.metrics?.seleccionadas_final || toolResults.gau?.parsed?.length || 0,
+      enviadas_gf: toolResults.gau?.metrics?.enviadas_gf || 0,
+      enviadas_ia: toolResults.gau?.metrics?.enviadas_ia || toolResults.gau?.metrics?.enviados_ia || 0
     },
     gf: {
       xss: toolResults.gf?.metrics?.xss ?? gfParsed.xssCandidates?.length ?? 0,

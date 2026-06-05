@@ -212,10 +212,11 @@ function statusFromResult(tool, result = {}, counters = {}, context = {}, existi
 
 function httpxSummary(result = {}, counters = {}) {
   const parsed = safeArray(result.parsed);
-  const responses = parsed.length || number(result.parsed_count);
+  const responses = number(counters.respuestas_httpx ?? result.metrics?.respuestas_httpx, parsed.length || number(result.parsed_count));
   const assets = new Set(parsed.map(item => item.finalUrl || item.final_url || item.url || item.input).filter(Boolean));
   const metricAssets = number(result.metrics?.activos_vivos ?? counters.activos_vivos);
 
+  if (metricAssets > 0 && responses > metricAssets) return `${responses} respuestas / ${metricAssets} activo${metricAssets === 1 ? '' : 's'} vivo${metricAssets === 1 ? '' : 's'}`;
   if (assets.size > 0 && responses > assets.size) return `${responses} respuestas / ${assets.size} activo${assets.size === 1 ? '' : 's'} vivo${assets.size === 1 ? '' : 's'}`;
   if (assets.size > 0) return `${assets.size} activo${assets.size === 1 ? '' : 's'} vivo${assets.size === 1 ? '' : 's'}`;
   if (metricAssets > 0) return `${metricAssets} activo${metricAssets === 1 ? '' : 's'} vivo${metricAssets === 1 ? '' : 's'}`;
@@ -234,7 +235,12 @@ function toolDetail(tool, result = {}, counters = {}, context = {}) {
   if (tool === 'ports') return `${number(counters.puertos_abiertos ?? result.metrics?.puertos_abiertos)} abiertos${counters.source || result.metrics?.source ? ` / ${counters.source || result.metrics.source}` : ''}`;
   if (tool === 'feroxbuster') return `${number(counters.rutas_descubiertas ?? result.metrics?.endpoints_encontrados)} rutas / ${number(counters.rutas_sensibles ?? result.metrics?.rutas_interesantes)} sensibles`;
   if (tool === 'katana') return `${number(counters.endpoints_encontrados ?? result.metrics?.endpoints_normalizados ?? parsedLength(result))} endpoints / ${number(counters.superficie_util ?? result.metrics?.superficie_util)} superficie`;
-  if (tool === 'gau') return `${number(counters.endpoints_encontrados ?? result.metrics?.endpoints_encontrados ?? parsedLength(result))} historicas / ${number(counters.con_parametros ?? result.metrics?.con_parametros)} con parametros`;
+  if (tool === 'gau') {
+    const raw = number(counters.raw_urls ?? result.metrics?.raw_urls);
+    const selected = number(counters.seleccionadas_final ?? result.metrics?.seleccionadas_final ?? counters.endpoints_encontrados ?? result.metrics?.endpoints_encontrados ?? parsedLength(result));
+    const params = number(counters.con_parametros ?? result.metrics?.con_parametros);
+    return `${raw} analizadas / ${selected} seleccionadas / ${params} con parametros`;
+  }
   if (tool === 'gf') {
     const xss = number(counters.xss ?? result.metrics?.xss);
     const sqli = number(counters.sqli ?? result.metrics?.sqli);

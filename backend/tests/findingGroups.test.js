@@ -32,7 +32,7 @@ function testSqlmapPossible() {
   assert.strictEqual(groups.confirmed.length, 0);
   assert.strictEqual(groups.possible.length, 1);
   assert.strictEqual(groups.discarded.length, 0);
-  assert.strictEqual(groups.possible[0].severity, 'high');
+  assert.strictEqual(groups.possible[0].severity, 'medium');
   assert.strictEqual(groups.possible[0].requiresManualValidation, true);
 }
 

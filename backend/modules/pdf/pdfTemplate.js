@@ -1,5 +1,5 @@
 const { COLORS, SEVERITY, FONTS, PAGE } = require('./pdfStyles');
-const { drawHorizontalChart, drawRiskGauge, drawSeverityBars } = require('./pdfCharts');
+const { drawDonutChart, drawHorizontalChart, drawRiskGauge, drawSeverityBars } = require('./pdfCharts');
 const { getAsset, normalizeSeverity, safeArray, text, truncate } = require('./pdfUtils');
 
 function pageBounds(doc) {
@@ -233,11 +233,17 @@ function drawCharts(doc, report) {
 
   panel(doc, left + half + gap, y, half, chartPanelHeight, { fill: COLORS.panel });
   doc.font(FONTS.bold).fontSize(10).fillColor(COLORS.text).text('Resultados tecnicos por herramienta', left + half + gap + 14, y + 14, { width: half - 28 });
-  const toolChartHeight = drawHorizontalChart(doc, left + half + gap + 14, y + 42, half - 28, report.toolChart, {
-    maxItems: 8,
+  drawDonutChart(doc, left + half + gap + 16, y + 40, 76, report.toolChart, {
+    maxItems: 6,
+    label: 'total',
+    innerColor: COLORS.panel,
+    colors: [COLORS.low, COLORS.high, COLORS.medium, COLORS.info, COLORS.critical, COLORS.success, COLORS.borderSoft]
+  });
+  const toolChartHeight = drawHorizontalChart(doc, left + half + gap + 100, y + 42, half - 114, report.toolChart, {
+    maxItems: 6,
     colors: [COLORS.low, COLORS.medium, COLORS.high, COLORS.success, COLORS.info]
   });
-  const noteY = Math.min(y + chartPanelHeight - 34, y + 42 + toolChartHeight + 10);
+  const noteY = Math.min(y + chartPanelHeight - 34, y + 42 + toolChartHeight + 12);
   doc.font(FONTS.regular).fontSize(6.8).fillColor(COLORS.subtle)
     .text('Incluye resultados tecnicos, candidatos y hardening; no todos son vulnerabilidades confirmadas.', left + half + gap + 14, noteY, { width: half - 28 });
 

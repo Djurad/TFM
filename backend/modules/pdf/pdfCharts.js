@@ -98,6 +98,50 @@ function drawRiskGauge(doc, x, y, width, score) {
   return 40;
 }
 
+function drawDonutChart(doc, x, y, size, items = [], options = {}) {
+  const colors = options.colors || [COLORS.low, COLORS.high, COLORS.medium, COLORS.info, COLORS.critical, COLORS.success, COLORS.borderSoft];
+  const rows = items.slice(0, options.maxItems || 6);
+  const rest = items.slice(options.maxItems || 6).reduce((sum, item) => sum + Number(item.value || 0), 0);
+  const data = rest > 0 ? [...rows, { label: 'otros', value: rest }] : rows;
+  const total = data.reduce((sum, item) => sum + Number(item.value || 0), 0);
+  const cx = x + size / 2;
+  const cy = y + size / 2;
+  const radius = size / 2;
+  let start = -90;
+
+  if (total <= 0) {
+    doc.circle(cx, cy, radius).fill(COLORS.borderSoft);
+  } else {
+    data.forEach((item, index) => {
+      const value = Number(item.value || 0);
+      if (value <= 0) return;
+      const sweep = (value / total) * 360;
+      const end = start + sweep;
+      const steps = Math.max(3, Math.ceil(sweep / 8));
+
+      doc.moveTo(cx, cy);
+      for (let i = 0; i <= steps; i += 1) {
+        const angle = (start + ((end - start) * i / steps)) * Math.PI / 180;
+        const px = cx + Math.cos(angle) * radius;
+        const py = cy + Math.sin(angle) * radius;
+        if (i === 0) doc.lineTo(px, py);
+        else doc.lineTo(px, py);
+      }
+      doc.closePath().fill(colors[index % colors.length]);
+      start = end;
+    });
+  }
+
+  doc.circle(cx, cy, radius * 0.58).fill(options.innerColor || COLORS.panel);
+  doc.circle(cx, cy, radius).strokeColor(COLORS.borderSoft).lineWidth(0.6).stroke();
+  doc.font(FONTS.bold).fontSize(options.valueSize || 11).fillColor(COLORS.text);
+  fixedText(doc, String(total), x, y + size / 2 - 8, { width: size, align: 'center', height: 12 });
+  doc.font(FONTS.regular).fontSize(5.8).fillColor(COLORS.muted);
+  fixedText(doc, options.label || 'total', x, y + size / 2 + 5, { width: size, align: 'center', height: 8 });
+
+  return size;
+}
+
 function drawDonutLegend(doc, x, y, items = [], total = 0) {
   let cursorY = y;
   items.forEach(item => {
@@ -109,6 +153,7 @@ function drawDonutLegend(doc, x, y, items = [], total = 0) {
 }
 
 module.exports = {
+  drawDonutChart,
   drawDonutLegend,
   drawHorizontalChart,
   drawRiskGauge,

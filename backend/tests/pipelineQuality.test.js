@@ -4,7 +4,7 @@ const {
   deduplicarHttpxResultados,
   parsearNucleiJsonl
 } = require('../modules/reconocimiento');
-const { filtrarYPriorizarUrlsGau } = require('../modules/gau');
+const { ejecutarGau, filtrarYPriorizarUrlsGau } = require('../modules/gau');
 const {
   procesarFeroxRaw,
   esRutaInteresante,
@@ -60,7 +60,10 @@ function testGauFiltroInteligente() {
     'https://demo.testfire.net/search?q=four',
     'https://demo.testfire.net/admin',
     'https://demo.testfire.net/api/user?id=1',
-    'https://demo.testfire.net/download.php?file=a'
+    'https://demo.testfire.net/download.php?file=a',
+    'https://demo.testfire.net/search?q=%3Cscript%3Ealert(1)%3C/script%3E',
+    'https://demo.testfire.net/1234567890*~1*/cgi.exe',
+    'https://demo.testfire.net/api/user?id=FUZZ'
   ];
 
   const result = filtrarYPriorizarUrlsGau(raw, 'demo.testfire.net', {
@@ -73,12 +76,112 @@ function testGauFiltroInteligente() {
   assert.strictEqual(result.discardedStats.assets_descartados, 1000);
   assert.strictEqual(result.discardedStats.urls_externas_descartadas, 2);
   assert.strictEqual(result.discardedStats.patrones_deduplicados, 1);
+  assert.strictEqual(result.discardedStats.ruido_historico_descartado, 3);
   assert.ok(result.selected.some(endpoint => endpoint.url.includes('/api/user?id=1')));
   assert.ok(result.selected.some(endpoint => endpoint.url.includes('/admin')));
   assert.ok(result.selected.every(endpoint => endpoint.url.includes('demo.testfire.net')));
 
   const empty = filtrarYPriorizarUrlsGau([], 'demo.testfire.net');
   assert.strictEqual(empty.selected.length, 0);
+}
+
+async function testGauProvidersYFallbacks() {
+  const llamadasOtx = [];
+  const soloOtx = await ejecutarGau('demo.testfire.net', {
+    enabled: true,
+    timeoutSeconds: 10,
+    ejecutarProceso: async (binario, args, timeoutMs, input) => {
+      llamadasOtx.push({ binario, args, timeoutMs, input });
+      return {
+        stdout: 'https://demo.testfire.net/login.jsp\nhttps://demo.testfire.net/search?q=test\n',
+        stderr: '',
+        exitCode: 0,
+        timedOut: false,
+        notInstalled: false,
+        error: null
+      };
+    }
+  });
+
+  assert.strictEqual(soloOtx.status, 'success');
+  assert.strictEqual(soloOtx.metrics.source, 'gau:otx');
+  assert.strictEqual(soloOtx.metrics.provider_usado, 'otx');
+  assert.deepStrictEqual(soloOtx.metrics.providers_probados, ['otx']);
+  assert.strictEqual(llamadasOtx.length, 1);
+  assert.deepStrictEqual(llamadasOtx[0].args, ['demo.testfire.net', '--providers', 'otx', '--timeout', '10']);
+
+  const llamadasFallback = [];
+  const fallbackProvider = await ejecutarGau('demo.testfire.net', {
+    enabled: true,
+    timeoutSeconds: 10,
+    ejecutarProceso: async (binario, args) => {
+      const provider = args[2];
+      llamadasFallback.push(provider || binario);
+      if (provider === 'wayback') {
+        return {
+          stdout: '',
+          stderr: 'timeout',
+          exitCode: null,
+          timedOut: true,
+          notInstalled: false,
+          error: 'timeout'
+        };
+      }
+      if (provider === 'commoncrawl') {
+        return {
+          stdout: 'https://demo.testfire.net/bank/queryxpath.jsp?id=1\n',
+          stderr: '',
+          exitCode: 0,
+          timedOut: false,
+          notInstalled: false,
+          error: null
+        };
+      }
+      return {
+        stdout: '',
+        stderr: '',
+        exitCode: 0,
+        timedOut: false,
+        notInstalled: false,
+        error: null
+      };
+    }
+  });
+
+  assert.strictEqual(fallbackProvider.status, 'partial');
+  assert.strictEqual(fallbackProvider.metrics.source, 'gau:commoncrawl');
+  assert.deepStrictEqual(llamadasFallback, ['otx', 'wayback', 'commoncrawl']);
+  assert.ok(fallbackProvider.warning.includes('timeout'));
+
+  const fallbackWaybackurls = await ejecutarGau('demo.testfire.net', {
+    enabled: true,
+    timeoutSeconds: 10,
+    ejecutarProceso: async binario => {
+      if (binario === 'gau') {
+        return {
+          stdout: '',
+          stderr: '',
+          exitCode: null,
+          timedOut: false,
+          notInstalled: true,
+          error: 'spawn gau ENOENT'
+        };
+      }
+      return {
+        stdout: 'https://demo.testfire.net/default.htm\n',
+        stderr: '',
+        exitCode: 0,
+        timedOut: false,
+        notInstalled: false,
+        error: null
+      };
+    }
+  });
+
+  assert.strictEqual(fallbackWaybackurls.status, 'partial');
+  assert.strictEqual(fallbackWaybackurls.metrics.source, 'waybackurls');
+  assert.strictEqual(fallbackWaybackurls.metrics.fallback_waybackurls_usado, true);
+  assert.strictEqual(fallbackWaybackurls.parsed.length, 1);
 }
 
 function testFeroxFixtures() {
@@ -135,9 +238,16 @@ function testNucleiFixtures() {
   assert.strictEqual(groups.possible.some(f => f.templateID === 'cors-misconfig'), true);
 }
 
-testHttpxDedup();
-testGauFiltroInteligente();
-testFeroxFixtures();
-testNucleiFixtures();
+async function main() {
+  testHttpxDedup();
+  testGauFiltroInteligente();
+  await testGauProvidersYFallbacks();
+  testFeroxFixtures();
+  testNucleiFixtures();
+  console.log('pipelineQuality tests ok');
+}
 
-console.log('pipelineQuality tests ok');
+main().catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});

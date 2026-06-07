@@ -681,6 +681,7 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
   const includeNucleiInfo = process.env.NUCLEI_INCLUDE_INFO === 'true';
   const sqlmapCrawlIfNoParams = process.env.SQLMAP_CRAWL_IF_NO_PARAMS === 'true';
   const timeoutMs = Number(process.env.TOOL_TIMEOUT_SECONDS || 120) * 1000;
+  const gauTimeoutSeconds = Number(process.env.GAU_TIMEOUT_SECONDS || 10);
   const maxFeroxUrls = Number(process.env.MAX_FEROX_URLS || 100);
   const maxDalfoxUrls = Number(process.env.MAX_DALFOX_URLS || 50);
   const maxSqlmapUrls = Number(process.env.MAX_SQLMAP_URLS || 10);
@@ -1136,6 +1137,12 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
         findings: [],
         error: 'gau no aplica a targets locales o direcciones IP',
         metrics: {
+          source: 'none',
+          provider_principal: String(process.env.GAU_PROVIDERS || 'otx').split(',')[0].trim() || 'otx',
+          providers_probados: [],
+          provider_usado: null,
+          gau_raw_urls: 0,
+          fallback_raw_urls: 0,
           endpoints_encontrados: 0,
           raw_urls: 0,
           urls_validas: 0,
@@ -1147,10 +1154,13 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
           seleccionadas_final: 0,
           enviadas_gf: 0,
           enviados_ia: 0,
-          raw_length: 0
+          enviadas_ia: 0,
+          raw_length: 0,
+          timeout_seconds: gauTimeoutSeconds,
+          fallback_waybackurls_usado: false
         }
       }
-    : await ejecutarGau(target, { timeoutMs });
+    : await ejecutarGau(target, { timeoutSeconds: gauTimeoutSeconds });
   logVar('gauResult', gauResult);
   toolResults.gau = gauResult;
   logVar('toolResults.gau', toolResults.gau);

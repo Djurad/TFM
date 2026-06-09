@@ -6,7 +6,7 @@ const {
   percentage,
   safeArray,
   sortFindings
-} = require('../procesamiento/findingGroups');
+} = require('../priorizacion/findingGroups');
 
 const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'info'];
 const SENSITIVE_PATH_RE = /(admin|login|upload|api|swagger|openapi|graphql|debug|backup|config|secret|token)/i;

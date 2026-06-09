@@ -1,5 +1,5 @@
 const { spawn } = require('child_process');
-const { extraerFindingsDeterministas } = require('../procesamiento/extractores');
+const { extraerFindingsDeterministas } = require('../../procesamiento/extractores');
 
 function ejecutarConInput(binario, args = [], input = '', opciones = {}) {
   return new Promise((resolve, reject) => {

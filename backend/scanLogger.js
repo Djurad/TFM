@@ -4,7 +4,7 @@ const path = require('path');
 const MAX_BLOCK_CHARS = Number(process.env.LOG_MAX_BLOCK_CHARS || 50000);
 
 function asegurarDirectorioLogs() {
-  const dir = path.join(__dirname, '..', '..', 'logs');
+  const dir = path.join(__dirname, '..', 'logs');
   fs.mkdirSync(dir, { recursive: true });
   return dir;
 }

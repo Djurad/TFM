@@ -2,17 +2,17 @@ const assert = require('assert');
 const {
   construirInputHttpx,
   deduplicarHttpxResultados
-} = require('../modules/reconocimiento');
-const { parsearNucleiJsonl } = require('../modules/herramientas/nuclei');
-const { ejecutarGau, filtrarYPriorizarUrlsGau } = require('../modules/herramientas/gau');
+} = require('../modules/reconocimiento/reconocimiento');
+const { parsearNucleiJsonl } = require('../modules/reconocimiento/herramientas/nuclei');
+const { ejecutarGau, filtrarYPriorizarUrlsGau } = require('../modules/reconocimiento/herramientas/gau');
 const {
   procesarFeroxRaw,
   esRutaInteresante,
   esPosibleVulnerabilidad
-} = require('../modules/herramientas/feroxbuster');
+} = require('../modules/reconocimiento/herramientas/feroxbuster');
 const { extraerFindingsDeterministas } = require('../modules/procesamiento/extractores');
 const { clasificarFindings } = require('../modules/procesamiento/clasificadorFindings');
-const { buildFindingGroups } = require('../modules/procesamiento/findingGroups');
+const { buildFindingGroups } = require('../modules/priorizacion/findingGroups');
 
 function testHttpxDedup() {
   const inputDemo = construirInputHttpx(

@@ -1,9 +1,9 @@
 const assert = require('assert');
-const { parsearDalfox } = require('../modules/herramientas/dalfox');
+const { parsearDalfox } = require('../modules/reconocimiento/herramientas/dalfox');
 const { extraerFindingsDeterministas } = require('../modules/procesamiento/extractores');
 const { clasificarFindings } = require('../modules/procesamiento/clasificadorFindings');
-const { buildFindingGroups } = require('../modules/procesamiento/findingGroups');
-const { calcularRiskScore } = require('../modules/procesamiento/scoring');
+const { buildFindingGroups } = require('../modules/priorizacion/findingGroups');
+const { calcularRiskScore } = require('../modules/priorizacion/scoring');
 
 const fixture = `[
 {"type":"V","inject_type":"inHTML-URL","poc_type":"plain","method":"GET","data":"https://demo.testfire.net/util/serverStatusCheckService.jsp?HostName=%22%3E%3Csvg+onload%3D%22setInterval%28%27alert%281%29%27%2C1000%29%22+class%3Ddalfox%3E","param":"HostName","payload":"\\"><svg onload=\\"setInterval('alert(1)',1000)\\" class=dalfox>","evidence":"4 line:  \\t\\"HostName\\": \\"\\"><svg onload=\\"setInterval('alert(1)',1000)\\" class=dalfox>\\",\\r","cwe":"CWE-79","severity":"High","message_id":527,"message_str":"Triggered XSS Payload (found DOM Object): HostName=\\"\\"><svg onload=\\"setInterval('alert(1)',1000)\\" class=dalfox>"},

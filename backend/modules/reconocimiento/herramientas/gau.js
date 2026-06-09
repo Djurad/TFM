@@ -1,5 +1,5 @@
 const { execFile } = require('child_process');
-const { esAssetEstatico } = require('../procesamiento/clasificadorFindings');
+const { esAssetEstatico } = require('../../procesamiento/clasificadorFindings');
 
 const PARAMS_INTERESANTES = [
   'id',

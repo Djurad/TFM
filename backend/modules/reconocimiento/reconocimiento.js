@@ -1,4 +1,4 @@
-const { esAssetEstatico } = require('./procesamiento/clasificadorFindings');
+const { esAssetEstatico } = require('../procesamiento/clasificadorFindings');
 const { ejecutarGau } = require('./herramientas/gau');
 const { ejecutarFeroxbuster } = require('./herramientas/feroxbuster');
 const { ejecutarGf, deduplicarPorPatron, ordenarPorPrioridad, PRIORIDAD_PARAMS } = require('./herramientas/gf');
@@ -15,7 +15,7 @@ const { ejecutarHttpsRedirect } = require('./analizadores/httpsRedirect');
 const { ejecutarRobotsSitemap } = require('./analizadores/robotsSitemap');
 const { ejecutarTls } = require('./analizadores/tls');
 const { ejecutarPorts } = require('./analizadores/ports');
-const { extraerFindingsDeterministas } = require('./procesamiento/extractores');
+const { extraerFindingsDeterministas } = require('../procesamiento/extractores');
 
 function limpiarColoresANSI(texto = '') {
   return texto.replace(/\x1B\[[0-9;]*m/g, '');

@@ -2,20 +2,20 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env'), override: true });
-const { generarPdfRespuesta, generarPdfDesdeDatos } = require('./utils/pdf');
-const { ejecutarReconocimiento } = require('./modules/reconocimiento');
-const { enriquecerFindingsIA } = require('./modules/procesamiento/ia');
+const { generarPdfAuditoria } = require('./modules/pdf/pdfGenerator');
+const { ejecutarReconocimiento } = require('./modules/reconocimiento/reconocimiento');
+const { enriquecerFindingsIA } = require('./modules/ia/ia');
 const { normalizarFindings } = require('./modules/procesamiento/normalizacion');
 const { extraerFindingsDeterministas } = require('./modules/procesamiento/extractores');
 const { clasificarFindings } = require('./modules/procesamiento/clasificadorFindings');
-const { calcularRiskScore } = require('./modules/procesamiento/scoring');
-const { correlacionarFindings, normalizarUrl, origenYRuta, parametro } = require('./modules/procesamiento/correlacion');
-const { crearScanLogger } = require('./modules/scanLogger');
+const { calcularRiskScore } = require('./modules/priorizacion/scoring');
+const { correlacionarFindings, normalizarUrl, origenYRuta, parametro } = require('./modules/priorizacion/correlacion');
+const { crearScanLogger } = require('./scanLogger');
 const {
   buildDashboardMetrics,
   buildFindingGroups,
   normalizeFindingsForReporting
-} = require('./modules/procesamiento/findingGroups');
+} = require('./modules/priorizacion/findingGroups');
 
 const app = express();
 const PORT = 3000;
@@ -689,7 +689,7 @@ app.post('/generar-informe', async (req, res) => {
     const findings = normalizeFindingsForReporting(
       clasificarFindings(normalizarFindings(req.body.findings, 'otra', target.trim()))
     );
-    generarPdfDesdeDatos(res, target.trim(), findings, {
+    generarPdfAuditoria(res, target.trim(), findings, {
       gfCandidates: req.body.gf_candidates || {},
       toolResults: req.body.tool_results || {},
       toolCounters: req.body.tool_counters || {},
@@ -701,25 +701,6 @@ app.post('/generar-informe', async (req, res) => {
       sqlmap_notice: req.body.sqlmap_notice,
       ai_notice: req.body.ai_notice
     });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Endpoint antiguo mantenido por compatibilidad.
-app.post('/descargar', async (req, res) => {
-  try {
-    const { prompt, respuesta } = req.body;
-
-    if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
-      return res.status(400).json({ error: 'Debes enviar un prompt valido.' });
-    }
-
-    if (!respuesta || typeof respuesta !== 'string' || !respuesta.trim()) {
-      return res.status(400).json({ error: 'Debes enviar una respuesta valida.' });
-    }
-
-    generarPdfRespuesta(res, prompt, respuesta);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

@@ -7,7 +7,7 @@ const {
   extraerFindingsDesdeRespuestaIA,
   normalizarFindings,
   parsearJsonIAFlexible
-} = require('./normalizacion');
+} = require('../procesamiento/normalizacion');
 
 const MODEL = process.env.OLLAMA_MODEL || 'llama3';
 const OLLAMA_REINTENTOS = 3;

@@ -39,7 +39,7 @@ const RUTAS_STATIC = [
   '/js/'
 ];
 
-const { normalizeFindingClassification } = require('./findingGroups');
+const { normalizeFindingClassification } = require('../priorizacion/findingGroups');
 
 const SEVERITY_MAP = {
   critical: 'critical',

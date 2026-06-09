@@ -1,116 +1,21 @@
-const { exec, execFile, spawn } = require('child_process');
-const { esAssetEstatico } = require('./clasificadorFindings');
-const { ejecutarGau } = require('./gau');
-const { ejecutarFeroxbuster } = require('./feroxbuster');
-const { ejecutarGf, deduplicarPorPatron, ordenarPorPrioridad, PRIORIDAD_PARAMS } = require('./gf');
-const { ejecutarTrufflehog } = require('./trufflehog');
-const { ejecutarHeaders } = require('./headers');
-const { ejecutarCookies } = require('./cookies');
-const { ejecutarHttpsRedirect } = require('./httpsRedirect');
-const { ejecutarRobotsSitemap } = require('./robotsSitemap');
-const { ejecutarTls } = require('./tls');
-const { ejecutarPorts } = require('./ports');
-const { extraerFindingsDeterministas } = require('./extractores');
-
-function ejecutarComando(comando, opciones = {}) {
-  return new Promise((resolve, reject) => {
-    exec(
-      comando,
-      {
-        timeout: 180000,
-        maxBuffer: 1024 * 1024 * 20
-      },
-      (error, stdout, stderr) => {
-        if (error) {
-          if (stdout && stdout.trim()) return resolve(stdout);
-          if (opciones.permitirFalloSinSalida) return resolve('');
-
-          const detalles = [
-            stderr && stderr.trim(),
-            error.message && error.message.trim()
-          ].filter(Boolean);
-
-          return reject(new Error(detalles.join('\n') || 'Comando fallido sin salida de error.'));
-        }
-
-        resolve(stdout);
-      }
-    );
-  });
-}
-
-function ejecutarBinario(binario, args = [], opciones = {}) {
-  return new Promise((resolve, reject) => {
-    execFile(
-      binario,
-      args,
-      {
-        timeout: opciones.timeout || 180000,
-        maxBuffer: opciones.maxBuffer || 1024 * 1024 * 20,
-        cwd: opciones.cwd || process.cwd()
-      },
-      (error, stdout, stderr) => {
-        if (error) {
-          if (stdout && stdout.trim()) return resolve(stdout);
-          if (opciones.permitirFalloSinSalida) return resolve('');
-
-          const detalles = [
-            stderr && stderr.trim(),
-            error.message && error.message.trim()
-          ].filter(Boolean);
-
-          return reject(new Error(detalles.join('\n') || `${binario} fallo sin salida de error.`));
-        }
-
-        resolve(stdout || '');
-      }
-    );
-  });
-}
-
-function ejecutarConInput(binario, args = [], input = '', opciones = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(binario, args, {
-      shell: false,
-      cwd: opciones.cwd || process.cwd()
-    });
-
-    let stdout = '';
-    let stderr = '';
-    let timedOut = false;
-    const timeoutMsProceso = Number(opciones.timeout === undefined ? 180000 : opciones.timeout);
-    const timeout = timeoutMsProceso > 0
-      ? setTimeout(() => {
-          timedOut = true;
-          child.kill('SIGTERM');
-        }, timeoutMsProceso)
-      : null;
-
-    child.stdout.on('data', data => {
-      stdout += data.toString();
-      if (stdout.length > (opciones.maxBuffer || 1024 * 1024 * 20)) child.kill('SIGTERM');
-    });
-    child.stderr.on('data', data => {
-      stderr += data.toString();
-    });
-    child.on('error', error => {
-      if (timeout) clearTimeout(timeout);
-      reject(error);
-    });
-    child.on('close', code => {
-      if (timeout) clearTimeout(timeout);
-      if (timedOut) return reject(new Error(`${binario} excedio el tiempo limite.`));
-      if (code !== 0 && !(opciones.permitirFalloSinSalida && !stdout.trim())) {
-        if (stdout && stdout.trim()) return resolve(stdout);
-        return reject(new Error([stderr.trim(), `${binario} finalizo con codigo ${code}`].filter(Boolean).join('\n')));
-      }
-      resolve(stdout);
-    });
-
-    child.stdin.write(input || '');
-    child.stdin.end();
-  });
-}
+const { esAssetEstatico } = require('./procesamiento/clasificadorFindings');
+const { ejecutarGau } = require('./herramientas/gau');
+const { ejecutarFeroxbuster } = require('./herramientas/feroxbuster');
+const { ejecutarGf, deduplicarPorPatron, ordenarPorPrioridad, PRIORIDAD_PARAMS } = require('./herramientas/gf');
+const { ejecutarTrufflehog } = require('./herramientas/trufflehog');
+const { ejecutarNuclei, construirArgsNuclei, contarDescartadosNuclei, parsearNucleiJsonl } = require('./herramientas/nuclei');
+const { ejecutarDalfox, parsearDalfox } = require('./herramientas/dalfox');
+const { ejecutarSqlmap, normalizarUrlParaSqlmap } = require('./herramientas/sqlmap');
+const { ejecutarSubfinder } = require('./herramientas/subfinder');
+const { ejecutarKatana } = require('./herramientas/katana');
+const { ejecutarHttpx, construirInputHttpx, deduplicarHttpxResultados } = require('./herramientas/httpx');
+const { ejecutarHeaders } = require('./analizadores/headers');
+const { ejecutarCookies } = require('./analizadores/cookies');
+const { ejecutarHttpsRedirect } = require('./analizadores/httpsRedirect');
+const { ejecutarRobotsSitemap } = require('./analizadores/robotsSitemap');
+const { ejecutarTls } = require('./analizadores/tls');
+const { ejecutarPorts } = require('./analizadores/ports');
+const { extraerFindingsDeterministas } = require('./procesamiento/extractores');
 
 function limpiarColoresANSI(texto = '') {
   return texto.replace(/\x1B\[[0-9;]*m/g, '');
@@ -203,116 +108,6 @@ function esCandidatoSqlmap(url) {
   return parametros.some(p => PRIORIDAD_PARAMS.includes(p));
 }
 
-function parsearHttpxJson(output) {
-  return parsearLineas(output)
-    .map(linea => {
-      try {
-        const item = JSON.parse(linea);
-
-        return {
-          url: item.url || item.input || null,
-          finalUrl: item.final_url || item.url || item.location || null,
-          input: item.input || null,
-          statusCode: item.status_code || null,
-          title: item.title || null,
-          tecnologias: item.tech || [],
-          webserver: item.webserver || null,
-          contentLength: item.content_length || null,
-          contentType: item.content_type || item.header?.['content-type'] || null,
-          location: item.location || null
-        };
-      } catch {
-        return null;
-      }
-    })
-    .filter(Boolean);
-}
-
-function esObjetoVacioDalfox(item) {
-  return item &&
-    typeof item === 'object' &&
-    !Array.isArray(item) &&
-    Object.keys(item).length === 0;
-}
-
-function normalizarItemsDalfox(parsed) {
-  const items = Array.isArray(parsed) ? parsed : [parsed];
-  return items
-    .flatMap(item => Array.isArray(item) ? item : [item])
-    .filter(item => item && typeof item === 'object' && !esObjetoVacioDalfox(item));
-}
-
-function parsearDalfox(output) {
-  const limpio = limpiarColoresANSI(String(output || '')).trim();
-  if (!limpio) return [];
-
-  try {
-    return normalizarItemsDalfox(JSON.parse(limpio));
-  } catch {
-    // Puede venir como JSON lines o con alguna linea no JSON.
-  }
-
-  return limpio
-    .split('\n')
-    .map(linea => linea.trim())
-    .filter(Boolean)
-    .flatMap(linea => {
-      try {
-        return normalizarItemsDalfox(JSON.parse(linea));
-      } catch {
-        return [];
-      }
-    });
-}
-
-function parsearSqlmap(url, output) {
-  const limpio = limpiarColoresANSI(output);
-
-  const confirmed =
-    limpio.includes('is vulnerable') ||
-    limpio.includes('sqlmap identified the following injection point') ||
-    limpio.includes('Parameter:');
-
-  const possible =
-    !confirmed &&
-    (
-      limpio.includes('might be injectable') ||
-      limpio.includes('heuristic test shows') ||
-      limpio.includes('appears to be injectable')
-    );
-
-  const parametro = (limpio.match(/Parameter:\s*([^\s(]+)/i) || [])[1] || null;
-  const dbms = (limpio.match(/back-end DBMS:\s*([^\n]+)/i) || [])[1]?.trim() || null;
-  const payload = (limpio.match(/Payload:\s*([^\n]+)/i) || [])[1]?.trim() || null;
-  const resumen = limpio
-    .split('\n')
-    .filter(linea =>
-      linea.includes('Parameter:') ||
-      linea.includes('Type:') ||
-      linea.includes('Title:') ||
-      linea.includes('Payload:') ||
-      linea.includes('back-end DBMS:')
-    )
-    .map(linea => linea.trim());
-
-  return {
-    url,
-    status: confirmed ? 'confirmed_sqli' : possible ? 'possible_sqli' : 'not_vulnerable',
-    vulnerable: confirmed,
-    parametro,
-    payload,
-    dbms,
-    evidencia: confirmed || possible
-      ? [
-          parametro ? `Parametro vulnerable: ${parametro}` : null,
-          payload ? `Payload: ${payload}` : null,
-          dbms ? `DBMS: ${dbms}` : null
-        ].filter(Boolean).join('\n')
-      : 'Sqlmap no confirmo inyeccion SQL.',
-    resumen
-  };
-}
-
 function categorizarEndpoint(url) {
   const lower = String(url || '').toLowerCase();
 
@@ -357,112 +152,6 @@ function crearEndpoint(url, sourceTool = 'katana', httpInfo = null) {
 
 function deduplicarUrls(urls) {
   return Array.from(new Set((urls || []).filter(Boolean).map(url => String(url).trim()).filter(Boolean)));
-}
-
-function normalizarInputHttpxItem(valor = '', preferirUrl = false) {
-  const raw = String(valor || '').trim();
-  if (!raw) return null;
-
-  if (/^https?:\/\//i.test(raw)) {
-    try {
-      const parsed = new URL(raw);
-      parsed.hash = '';
-      const base = `${parsed.protocol}//${parsed.host}`;
-      const input = (parsed.pathname && parsed.pathname !== '/') || parsed.search
-        ? `${parsed.origin}${parsed.pathname}${parsed.search}`.replace(/\/$/, '')
-        : base;
-      return {
-        input,
-        key: `${parsed.hostname.toLowerCase()}:${parsed.port || ''}`,
-        preferirUrl
-      };
-    } catch {
-      return null;
-    }
-  }
-
-  const limpio = limpiarTarget(raw);
-  if (!limpio) return null;
-
-  try {
-    const parsed = new URL(`http://${limpio}`);
-    return {
-      input: limpio,
-      key: `${parsed.hostname.toLowerCase()}:${parsed.port || ''}`,
-      preferirUrl
-    };
-  } catch {
-    return {
-      input: limpio,
-      key: limpio.toLowerCase(),
-      preferirUrl
-    };
-  }
-}
-
-function construirInputHttpx(entrada = {}, subdominios = []) {
-  const originalConProtocolo = /^https?:\/\//i.test(String(entrada.original || ''));
-  const candidatos = [
-    entrada.original,
-    entrada.inputUrl,
-    entrada.baseUrl,
-    ...(subdominios || [])
-  ];
-  const porHost = new Map();
-
-  candidatos.forEach(valor => {
-    const item = normalizarInputHttpxItem(valor, originalConProtocolo);
-    if (!item) return;
-    const existente = porHost.get(item.key);
-    if (!existente || (item.preferirUrl && !existente.preferirUrl)) {
-      porHost.set(item.key, item);
-    }
-  });
-
-  return Array.from(porHost.values()).map(item => item.input);
-}
-
-function normalizarClaveHttpx(item = {}) {
-  const candidate = item.finalUrl || item.final_url || item.url || item.input || '';
-  try {
-    const parsed = new URL(candidate);
-    parsed.hash = '';
-    return `${parsed.protocol}//${parsed.host}${parsed.pathname.replace(/\/$/, '') || '/'}${parsed.search}`.toLowerCase();
-  } catch {
-    return String(candidate || '').trim().replace(/\/$/, '').toLowerCase();
-  }
-}
-
-function deduplicarHttpxResultados(resultados = []) {
-  const mapa = new Map();
-  const duplicados = [];
-
-  resultados.filter(Boolean).forEach(item => {
-    const key = normalizarClaveHttpx(item);
-    if (!key) return;
-    if (!mapa.has(key)) {
-      mapa.set(key, {
-        ...item,
-        inputs: [item.input || item.url].filter(Boolean)
-      });
-      return;
-    }
-
-    const existente = mapa.get(key);
-    existente.inputs = deduplicarUrls([...(existente.inputs || []), item.input || item.url]);
-    existente.duplicateInputs = deduplicarUrls([...(existente.duplicateInputs || []), item.input || item.url]);
-    duplicados.push(item);
-  });
-
-  return {
-    unique: Array.from(mapa.values()),
-    duplicates: duplicados,
-    metrics: {
-      respuestas_httpx: resultados.length,
-      activos_vivos: mapa.size,
-      duplicados_httpx: duplicados.length
-    }
-  };
 }
 
 function normalizarClaveUrl(url) {
@@ -550,111 +239,8 @@ function buscarHttpInfo(url, httpx = []) {
   }
 }
 
-function valorSospechosoSqlmap(valor = '') {
-  const decoded = decodeURIComponent(String(valor || '')).toLowerCase();
-  return decoded.includes('<') ||
-    decoded.includes('>') ||
-    decoded.includes('script') ||
-    decoded.includes('alert') ||
-    decoded.includes('svg') ||
-    decoded.includes('iframe') ||
-    decoded.includes('onerror') ||
-    decoded.includes('onload');
-}
-
-function normalizarUrlParaSqlmap(url) {
-  try {
-    const parsed = new URL(url);
-    const entradas = Array.from(parsed.searchParams.entries());
-
-    parsed.search = '';
-    entradas.forEach(([key, value]) => {
-      if (value === '') {
-        parsed.searchParams.append(key, '1');
-      } else if (valorSospechosoSqlmap(value)) {
-        parsed.searchParams.append(key, 'test');
-      } else {
-        parsed.searchParams.append(key, value);
-      }
-    });
-
-    return parsed.href;
-  } catch {
-    return url;
-  }
-}
-
 function registrarPaso(nombre, mensaje, extra = {}) {
   console.log(`[recon] ${nombre}: ${mensaje}`, Object.keys(extra).length ? extra : '');
-}
-
-function contarDescartadosNuclei(lineas = []) {
-  return lineas.filter(linea => {
-    const lower = String(linea).toLowerCase();
-    try {
-      const item = JSON.parse(linea);
-      const severity = String(item.info?.severity || item.severity || '').toLowerCase();
-      const tags = Array.isArray(item.info?.tags)
-        ? item.info.tags.join(',')
-        : String(item.info?.tags || '');
-      const template = String(item['template-id'] || item.templateID || item.template_id || '');
-      const texto = `${severity} ${tags} ${template}`.toLowerCase();
-      return severity === 'info' ||
-        texto.includes('waf') ||
-        texto.includes('wildcard-dns') ||
-        texto.includes('tech') ||
-        texto.includes('favicon') ||
-        texto.includes('cdn');
-    } catch {
-      // Se mantiene el conteo para salida de texto.
-    }
-
-    return lower.includes('[info]') ||
-      lower.includes('waf-detect') ||
-      lower.includes('wildcard-dns-detect') ||
-      lower.includes('tech-detect') ||
-      lower.includes('favicon') ||
-      lower.includes('cdn');
-  }).length;
-}
-
-function parsearNucleiJsonl(output = '') {
-  return parsearLineas(output).map(linea => {
-    try {
-      const item = JSON.parse(linea);
-      return JSON.stringify(item);
-    } catch {
-      return linea;
-    }
-  });
-}
-
-function construirArgsNuclei() {
-  const includeInfo = process.env.NUCLEI_INCLUDE_INFO === 'true';
-  const severidades = process.env.NUCLEI_SEVERITIES ||
-    (includeInfo ? 'info,low,medium,high,critical' : 'critical,high,medium,low');
-  const args = ['-jsonl', '-silent', '-no-color', '-severity', severidades];
-  const templatesPath = process.env.NUCLEI_TEMPLATES_PATH;
-  const tags = process.env.NUCLEI_TAGS;
-  const rateLimit = process.env.NUCLEI_RATE_LIMIT;
-  const timeoutSeconds = process.env.NUCLEI_TIMEOUT_SECONDS;
-
-  if (templatesPath) args.push('-t', templatesPath);
-  if (tags) args.push('-tags', tags);
-  if (!includeInfo) args.push('-exclude-tags', 'dns,tech,waf,cdn,favicon');
-  if (rateLimit) args.push('-rl', rateLimit);
-  if (timeoutSeconds) args.push('-timeout', timeoutSeconds);
-
-  return {
-    args,
-    severidades,
-    includeInfo,
-    templatesPath: templatesPath || 'templates oficiales instaladas localmente',
-    tags: tags || '',
-    excludeTags: includeInfo ? '' : 'dns,tech,waf,cdn,favicon',
-    rateLimit: rateLimit || '',
-    timeoutSeconds: timeoutSeconds || ''
-  };
 }
 
 async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
@@ -678,7 +264,6 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
   logVar('target', target);
 
   const toolResults = {};
-  const includeNucleiInfo = process.env.NUCLEI_INCLUDE_INFO === 'true';
   const sqlmapCrawlIfNoParams = process.env.SQLMAP_CRAWL_IF_NO_PARAMS === 'true';
   const timeoutMs = Number(process.env.TOOL_TIMEOUT_SECONDS || 120) * 1000;
   const gauTimeoutSeconds = Number(process.env.GAU_TIMEOUT_SECONDS || 10);
@@ -687,226 +272,6 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
   const maxSqlmapUrls = Number(process.env.MAX_SQLMAP_URLS || 10);
   const maxJsSecretScan = Number(process.env.MAX_JS_SECRET_SCAN || 20);
   const passiveTimeoutMs = Number(process.env.PASSIVE_TIMEOUT_SECONDS || 8) * 1000;
-
-  async function ejecutarHerramienta(nombre, comando, parser = parsearLineas) {
-    try {
-      progreso(nombre, 'running', `Ejecutando ${nombre}`);
-      registrarPaso(nombre, 'ejecutando herramienta', { entrada: target, comando });
-      logVar(`${nombre}.comando`, comando);
-      const raw = await ejecutarComando(comando, {
-        permitirFalloSinSalida: nombre === 'nuclei'
-      });
-      logVar(`${nombre}.raw`, raw);
-      const parsed = parser(raw);
-      logVar(`${nombre}.parsed`, parsed);
-      const parsedCount = Array.isArray(parsed) ? parsed.length : 0;
-      registrarPaso(nombre, 'resultados producidos', { resultados: parsedCount });
-
-      toolResults[nombre] = {
-        status: 'success',
-        raw,
-        parsed,
-        parsed_count: parsedCount,
-        findings: []
-      };
-      logVar(`toolResults.${nombre}`, toolResults[nombre]);
-      progreso(nombre, 'done', `${nombre} finalizado`, { count: parsedCount });
-
-      return raw;
-    } catch (error) {
-      toolResults[nombre] = {
-        status: 'error',
-        raw: '',
-        parsed: [],
-        parsed_count: 0,
-        findings: [],
-        error: error.message
-      };
-      logVar(`toolResults.${nombre}`, toolResults[nombre]);
-      progreso(nombre, 'error', error.message);
-
-      console.error(`Error en ${nombre}:`, error.message);
-      return '';
-    }
-  }
-
-  async function ejecutarHerramientaInput(nombre, binario, args, input, parser = parsearLineas, opciones = {}) {
-    try {
-      progreso(nombre, 'running', `Ejecutando ${nombre}`);
-      registrarPaso(nombre, 'ejecutando herramienta', { entrada: target, binario, args });
-      logVar(`${nombre}.binario`, binario);
-      logVar(`${nombre}.args`, args);
-      logVar(`${nombre}.input`, input);
-      const raw = await ejecutarConInput(binario, args, input, {
-        timeout: nombre === 'nuclei' ? 0 : timeoutMs,
-        permitirFalloSinSalida: nombre === 'nuclei' || opciones.permitirFalloSinSalida
-      });
-      logVar(`${nombre}.raw`, raw);
-      const parsed = parser(raw);
-      logVar(`${nombre}.parsed`, parsed);
-      const parsedCount = Array.isArray(parsed) ? parsed.length : 0;
-      registrarPaso(nombre, 'resultados producidos', { resultados: parsedCount });
-
-      toolResults[nombre] = {
-        status: 'success',
-        raw,
-        parsed,
-        parsed_count: parsedCount,
-        findings: []
-      };
-      logVar(`toolResults.${nombre}`, toolResults[nombre]);
-      progreso(nombre, 'done', `${nombre} finalizado`, { count: parsedCount });
-
-      return raw;
-    } catch (error) {
-      toolResults[nombre] = {
-        status: 'error',
-        raw: '',
-        parsed: [],
-        parsed_count: 0,
-        findings: [],
-        error: error.message
-      };
-      logVar(`toolResults.${nombre}`, toolResults[nombre]);
-      progreso(nombre, 'error', error.message);
-
-      console.error(`Error en ${nombre}:`, error.message);
-      return '';
-    }
-  }
-
-  async function ejecutarDalfoxPorUrl(urls = []) {
-    const urlsValidas = deduplicarUrls(urls);
-    const rawPorUrl = {};
-    const parsedPorUrl = {};
-    const inputPorUrl = {};
-    const rawIntentosPorUrl = {};
-    const parsedIntentosPorUrl = {};
-    const argsPorUrl = {};
-    const timeoutPorUrl = {};
-    const parsedTotal = [];
-    let errores = 0;
-    let reintentos = 0;
-    const maxReintentos = Number(process.env.DALFOX_RETRIES || 1);
-    const dalfoxArgs = ['pipe', '--silence', '--format', 'json'];
-
-    if (urlsValidas.length === 0) {
-      const skipped = {
-        status: 'skipped',
-        raw: '',
-        parsed: [],
-        findings: [],
-        error: 'No hay endpoints con parametros para probar XSS.',
-        metrics: {
-          urls_analizadas: 0,
-          hallazgos: 0,
-          confirmadas: 0,
-          errores: 0,
-          reintentos: 0
-        }
-      };
-      logVar('toolResults.dalfox', skipped);
-      return skipped;
-    }
-
-    progreso('dalfox', 'running', `Ejecutando Dalfox sobre ${urlsValidas.length} URLs`);
-
-    for (const url of urlsValidas) {
-      const input = `${url}\n`;
-      inputPorUrl[url] = input;
-      argsPorUrl[url] = dalfoxArgs;
-      timeoutPorUrl[url] = timeoutMs;
-      logVar(`dalfox.inputPorUrl.${url}`, input);
-      logVar(`dalfox.binarioPorUrl.${url}`, 'dalfox');
-      logVar(`dalfox.argsPorUrl.${url}`, dalfoxArgs);
-      logVar(`dalfox.timeoutPorUrl.${url}`, timeoutMs);
-
-      for (let intento = 0; intento <= maxReintentos; intento += 1) {
-        try {
-          if (intento > 0) reintentos += 1;
-          registrarPaso('dalfox', 'ejecutando URL individual', {
-            entrada: url,
-            intento: intento + 1,
-            maxIntentos: maxReintentos + 1,
-            args: dalfoxArgs,
-            timeoutMs
-          });
-          const raw = await ejecutarConInput(
-            'dalfox',
-            dalfoxArgs,
-            input,
-            {
-              timeout: timeoutMs,
-              permitirFalloSinSalida: true
-            }
-          );
-          const parsed = parsearDalfox(raw);
-
-          rawIntentosPorUrl[url] = rawIntentosPorUrl[url] || [];
-          parsedIntentosPorUrl[url] = parsedIntentosPorUrl[url] || [];
-          rawIntentosPorUrl[url].push(raw);
-          parsedIntentosPorUrl[url].push(parsed);
-          rawPorUrl[url] = raw;
-          parsedPorUrl[url] = parsed;
-          logVar(`dalfox.rawPorUrl.${url}.intento${intento + 1}`, raw);
-          logVar(`dalfox.parsedPorUrl.${url}.intento${intento + 1}`, parsed);
-
-          if (parsed.length > 0) {
-            parsedTotal.push(...parsed);
-            break;
-          }
-
-          if (intento >= maxReintentos) break;
-          registrarPaso('dalfox', 'sin hallazgos en intento; reintentando URL individual', {
-            entrada: url,
-            rawLength: raw.length,
-            parsed: parsed.length
-          });
-        } catch (error) {
-          errores += 1;
-          rawPorUrl[url] = rawPorUrl[url] || '';
-          parsedPorUrl[url] = parsedPorUrl[url] || [];
-          logVar(`dalfox.errorPorUrl.${url}.intento${intento + 1}`, error.message);
-          console.error(`Error en dalfox para ${url}:`, error.message);
-          break;
-        }
-      }
-
-      logVar(`dalfox.rawPorUrl.${url}`, rawPorUrl[url] || '');
-      logVar(`dalfox.parsedPorUrl.${url}`, parsedPorUrl[url] || []);
-    }
-
-    const result = {
-      status: errores === 0 ? 'success' : parsedTotal.length > 0 ? 'partial' : 'error',
-      raw: JSON.stringify(rawPorUrl, null, 2),
-      parsed: parsedTotal,
-      findings: [],
-      error: errores > 0 ? `${errores} ejecuciones de Dalfox fallaron.` : null,
-      metrics: {
-        urls_analizadas: urlsValidas.length,
-        hallazgos: parsedTotal.length,
-        confirmadas: parsedTotal.filter(item => String(item.type || '').toUpperCase() === 'V').length,
-        errores,
-        reintentos,
-        max_reintentos_por_url: maxReintentos,
-        comando: 'dalfox pipe --silence --format json',
-        timeout_ms: timeoutMs
-      }
-    };
-
-    result.findings = extraerFindingsDeterministas('dalfox', result, target);
-    logVar('dalfox.inputPorUrl', inputPorUrl);
-    logVar('dalfox.argsPorUrl', argsPorUrl);
-    logVar('dalfox.timeoutPorUrl', timeoutPorUrl);
-    logVar('dalfox.rawPorUrl', rawPorUrl);
-    logVar('dalfox.rawIntentosPorUrl', rawIntentosPorUrl);
-    logVar('dalfox.parsedPorUrl', parsedPorUrl);
-    logVar('dalfox.parsedIntentosPorUrl', parsedIntentosPorUrl);
-    logVar('dalfox.findingsFinales', result.findings);
-    logVar('toolResults.dalfox', result);
-
-    return result;
-  }
 
   registrarPaso('normalizacion', 'entrada normalizada', {
     original: entrada.original,
@@ -917,50 +282,14 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
 
   const targetLocal = esTargetLocal(target) || esIpV4(target);
 
-  const subfinderOutput = targetLocal
-    ? ''
-    : await (async () => {
-        try {
-          progreso('subfinder', 'running', 'Buscando subdominios');
-          registrarPaso('subfinder', 'ejecutando herramienta', { entrada: target, binario: 'subfinder' });
-          logVar('subfinder.args', ['-d', target, '-silent']);
-          const raw = await ejecutarBinario('subfinder', ['-d', target, '-silent'], { timeout: timeoutMs });
-          logVar('subfinder.raw', raw);
-          toolResults.subfinder = {
-            status: 'success',
-            raw,
-            parsed: parsearLineas(raw),
-            findings: []
-          };
-          logVar('toolResults.subfinder', toolResults.subfinder);
-          progreso('subfinder', 'done', 'Subfinder finalizado', { count: toolResults.subfinder.parsed.length });
-          return raw;
-        } catch (error) {
-          toolResults.subfinder = {
-            status: 'error',
-            raw: '',
-            parsed: [],
-            findings: [],
-            error: error.message
-          };
-          logVar('toolResults.subfinder', toolResults.subfinder);
-          progreso('subfinder', 'error', error.message);
-          console.error('Error en subfinder:', error.message);
-          return '';
-        }
-      })();
-
-  if (targetLocal) {
-    toolResults.subfinder = {
-      status: 'skipped',
-      raw: '',
-      parsed: [],
-      findings: [],
-      error: 'subfinder no aplica a targets locales o direcciones IP'
-    };
-    logVar('toolResults.subfinder', toolResults.subfinder);
-    progreso('subfinder', 'skipped', 'Subfinder no aplica a targets locales o IP');
-  }
+  toolResults.subfinder = await ejecutarSubfinder(target, {
+    targetLocal,
+    timeoutMs,
+    logVar,
+    registrarPaso,
+    progreso
+  });
+  const subfinderOutput = toolResults.subfinder.raw || '';
 
   let subdominios = parsearLineas(subfinderOutput);
   logVar('subfinderOutput', subfinderOutput);
@@ -968,82 +297,15 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
   subdominios = deduplicarUrls([...subdominios, target]);
   logVar('subdominios', subdominios);
 
-  const inputHttpxItems = construirInputHttpx(entrada, subdominios);
-  const inputHttpx = inputHttpxItems.join('\n');
-  logVar('inputHttpxItems', inputHttpxItems);
-  logVar('inputHttpx', inputHttpx);
-  registrarPaso('httpx', 'entradas normalizadas', {
-    entradas: inputHttpxItems.length,
-    originales: deduplicarUrls([...subdominios, entrada.inputUrl, entrada.baseUrl]).length
+  const httpxResult = await ejecutarHttpx(entrada, subdominios, {
+    timeoutMs,
+    target,
+    logVar,
+    registrarPaso,
+    progreso
   });
-
-  const httpxOutput = await ejecutarHerramientaInput(
-    'httpx',
-    'httpx',
-    ['-silent', '-json', '-title', '-status-code', '-tech-detect', '-web-server', '-content-length', '-content-type', '-location', '-follow-redirects', '-no-color'],
-    inputHttpx,
-    parsearHttpxJson
-  );
-
-  let httpxRespuestas = parsearHttpxJson(httpxOutput);
-  let httpxDedup = deduplicarHttpxResultados(httpxRespuestas);
-  let httpx = httpxDedup.unique;
-  const httpxFallbackUrls = httpx.length === 0
-    ? deduplicarUrls([entrada.baseUrl, entrada.inputUrl].filter(url => /^https?:\/\//i.test(String(url || ''))))
-    : [];
-
-  if (httpxFallbackUrls.length > 0) {
-    httpx = httpxFallbackUrls.map(url => ({
-      url,
-      finalUrl: url,
-      input: url,
-      statusCode: null,
-      title: null,
-      tecnologias: [],
-      webserver: null,
-      contentLength: null,
-      contentType: null,
-      location: null,
-      fallback: true
-    }));
-
-    if (toolResults.httpx) {
-      toolResults.httpx.status = 'partial';
-      toolResults.httpx.warning = 'httpx no devolvio activos; se usa la URL normalizada como fallback para continuar validaciones HTTP.';
-      toolResults.httpx.parsed = httpx;
-      toolResults.httpx.parsed_count = httpx.length;
-      toolResults.httpx.metrics = {
-        ...(toolResults.httpx.metrics || {}),
-        respuestas_httpx: 0,
-        activos_vivos: httpx.length,
-        duplicados_httpx: 0,
-        entradas_httpx: inputHttpxItems.length,
-        fallback: true
-      };
-    }
-    logVar('httpxFallbackUrls', httpxFallbackUrls);
-    logVar('toolResults.httpx', toolResults.httpx);
-  }
-  logVar('httpxOutput', httpxOutput);
-  logVar('httpxRespuestas', httpxRespuestas);
-  logVar('httpxDuplicados', httpxDedup.duplicates);
-  logVar('httpx', httpx);
-  if (toolResults.httpx && !toolResults.httpx.metrics?.fallback) {
-    toolResults.httpx.parsed = httpx;
-    toolResults.httpx.parsed_count = httpx.length;
-    toolResults.httpx.metrics = {
-      ...(toolResults.httpx.metrics || {}),
-      entradas_httpx: inputHttpxItems.length,
-      ...httpxDedup.metrics
-    };
-    logVar('toolResults.httpx', toolResults.httpx);
-  }
-  registrarPaso('httpx', 'deduplicacion completada', {
-    entradas: inputHttpxItems.length,
-    respuestas: httpxDedup.metrics.respuestas_httpx,
-    activosUnicos: httpxDedup.metrics.activos_vivos,
-    duplicados: httpxDedup.metrics.duplicados_httpx
-  });
+  toolResults.httpx = httpxResult.result;
+  const httpx = httpxResult.httpx;
   const activos = deduplicarUrls(httpx.map(item => item.finalUrl || item.url).filter(Boolean));
   logVar('activos', activos);
   const inputKatana = activos.join('\n');
@@ -1092,25 +354,14 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
 
   logVar('inputKatana', inputKatana);
 
-  const katanaOutput = activos.length > 0
-    ? await ejecutarHerramientaInput(
-        'katana',
-        'katana',
-        ['-silent', '-depth', '3', '-jc', '-kf', 'all'],
-        inputKatana
-      )
-    : '';
-
-  if (activos.length === 0) {
-    toolResults.katana = {
-      status: 'skipped',
-      raw: '',
-      parsed: [],
-      findings: [],
-      error: 'No hay activos HTTP para rastrear.'
-    };
-    logVar('toolResults.katana', toolResults.katana);
-  }
+  toolResults.katana = await ejecutarKatana(activos, {
+    timeoutMs,
+    target,
+    logVar,
+    registrarPaso,
+    progreso
+  });
+  const katanaOutput = toolResults.katana.raw || '';
 
   const endpointUrlsCrudosSinDedup = [
     ...parsearLineas(katanaOutput),
@@ -1246,58 +497,20 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
     includeInfo: nucleiConfig.includeInfo
   });
 
-  const nucleiOutput = activos.length > 0
-    ? await ejecutarHerramientaInput(
-        'nuclei',
-        'nuclei',
-        nucleiConfig.args,
-        inputNuclei,
-        parsearNucleiJsonl,
-        { permitirFalloSinSalida: true }
-      )
-    : '';
-
-  if (activos.length === 0) {
-    toolResults.nuclei = {
-      status: 'skipped',
-      raw: '',
-      parsed: [],
-      findings: [],
-      error: 'No hay activos HTTP para analizar con nuclei.'
-    };
-    logVar('toolResults.nuclei', toolResults.nuclei);
-  }
-
-  if (toolResults.nuclei) {
-    const parsedNuclei = Array.isArray(toolResults.nuclei.parsed)
-      ? toolResults.nuclei.parsed
-      : parsearNucleiJsonl(nucleiOutput);
-    toolResults.nuclei.parsed = parsedNuclei;
-    toolResults.nuclei.parsed_count = parsedNuclei.length;
-    toolResults.nuclei.metrics = {
-      ...(toolResults.nuclei.metrics || {}),
-      targets: activos.length,
-      raw_lineas: parsearLineas(nucleiOutput).length,
-      parsed_findings: parsedNuclei.length,
-      templates_path: nucleiConfig.templatesPath,
-      severities: nucleiConfig.severidades,
-      tags: nucleiConfig.tags,
-      exclude_tags: nucleiConfig.excludeTags,
-      include_info: nucleiConfig.includeInfo,
-      rate_limit: nucleiConfig.rateLimit,
-      timeout_seconds: nucleiConfig.timeoutSeconds
-    };
-    logVar('toolResults.nuclei', toolResults.nuclei);
-  }
+  toolResults.nuclei = await ejecutarNuclei(activos, { timeoutMs });
+  logVar('toolResults.nuclei', toolResults.nuclei);
+  progreso('nuclei', toolResults.nuclei.status || 'done', 'Nuclei finalizado', {
+    count: toolResults.nuclei.parsed_count || 0
+  });
 
   const vulnerabilidades = Array.isArray(toolResults.nuclei?.parsed)
     ? toolResults.nuclei.parsed
-    : parsearNucleiJsonl(nucleiOutput);
-  logVar('nucleiOutput', nucleiOutput);
+    : [];
+  logVar('nucleiOutput', toolResults.nuclei.raw || '');
   logVar('vulnerabilidades', vulnerabilidades);
   registrarPaso('nuclei', 'ruido informativo/fingerprinting descartado por configuracion o clasificador', {
     descartados: contarDescartadosNuclei(vulnerabilidades),
-    includeInfo: includeNucleiInfo
+    includeInfo: nucleiConfig.includeInfo
   });
 
   const urlsDalfoxBase = limitarUrls(
@@ -1314,7 +527,13 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
 
   console.log(`[dalfox] URLs recibidas desde gf xss: ${xssDesdeGf.length}`);
 
-  toolResults.dalfox = await ejecutarDalfoxPorUrl(urlsDalfox);
+  toolResults.dalfox = await ejecutarDalfox(urlsDalfox, {
+    timeoutMs,
+    target,
+    logVar,
+    registrarPaso,
+    progreso
+  });
   progreso('dalfox', toolResults.dalfox?.status || 'done', 'Dalfox finalizado');
 
   const dalfox = toolResults.dalfox.parsed || [];
@@ -1334,82 +553,16 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
   candidatosSqlmap = deduplicarPorPatron(candidatosSqlmap);
   logVar('candidatosSqlmap', candidatosSqlmap);
 
-  const sqlmap = [];
-
-  for (const url of candidatosSqlmap) {
-    try {
-      progreso('sqlmap', 'running', `Probando SQLi en ${url}`);
-      registrarPaso('sqlmap', 'ejecutando sobre URL parametrizada', { entrada: url });
-      const sqlmapOutput = await ejecutarBinario(
-        'python3',
-        ['tools/sqlmap/sqlmap.py', '-u', url, '--batch', '--random-agent', '--level=1', '--risk=1', '--smart', '--disable-coloring'],
-        { timeout: timeoutMs }
-      );
-
-      const parsedSqlmap = parsearSqlmap(url, sqlmapOutput);
-      logVar(`sqlmapOutput.${url}`, sqlmapOutput);
-      logVar(`parsedSqlmap.${url}`, parsedSqlmap);
-      sqlmap.push(parsedSqlmap);
-    } catch (error) {
-      console.error(`Error en sqlmap para ${url}:`, error.message);
-
-      sqlmap.push({
-        url,
-        vulnerable: false,
-        error: error.message,
-        evidencia: null,
-        resumen: []
-      });
-      logVar(`sqlmapError.${url}`, error.message);
-    }
-  }
-
-  if (candidatosSqlmap.length === 0 && sqlmapCrawlIfNoParams && activos.length > 0) {
-    for (const url of activos.slice(0, 3)) {
-      try {
-        registrarPaso('sqlmap', 'sin parametros descubiertos; ejecutando crawl ligero', { entrada: url });
-        const sqlmapOutput = await ejecutarBinario(
-          'python3',
-          ['tools/sqlmap/sqlmap.py', '-u', url, '--crawl=2', '--batch', '--random-agent', '--level=1', '--risk=1', '--smart', '--disable-coloring'],
-          { timeout: timeoutMs }
-        );
-        const parsedSqlmap = parsearSqlmap(url, sqlmapOutput);
-        logVar(`sqlmapOutput.${url}`, sqlmapOutput);
-        logVar(`parsedSqlmap.${url}`, parsedSqlmap);
-        sqlmap.push(parsedSqlmap);
-      } catch (error) {
-        sqlmap.push({
-          url,
-          status: 'error',
-          vulnerable: false,
-          error: error.message,
-          evidencia: null,
-          resumen: []
-        });
-      }
-    }
-  }
-
-  if (candidatosSqlmap.length === 0 && !sqlmapCrawlIfNoParams) {
-    registrarPaso('sqlmap', 'no ejecutado', {
-      motivo: 'sqlmap no se ejecuto porque no se encontraron parametros'
-    });
-  }
-
-  toolResults.sqlmap = {
-    status: candidatosSqlmap.length === 0 && !sqlmapCrawlIfNoParams
-      ? 'skipped'
-      : sqlmap.some(item => item.error) ? 'partial' : 'success',
-    raw: JSON.stringify(sqlmap, null, 2),
-    parsed: sqlmap,
-    findings: [],
-    error: candidatosSqlmap.length === 0 && !sqlmapCrawlIfNoParams
-      ? 'sqlmap no se ejecuto porque no se encontraron parametros'
-      : null
-  };
-  logVar('sqlmap', sqlmap);
-  logVar('toolResults.sqlmap', toolResults.sqlmap);
+  toolResults.sqlmap = await ejecutarSqlmap(candidatosSqlmap, {
+    activos,
+    timeoutMs,
+    sqlmapCrawlIfNoParams,
+    logVar,
+    registrarPaso,
+    progreso
+  });
   progreso('sqlmap', toolResults.sqlmap.status || 'done', 'Sqlmap finalizado');
+  const sqlmap = toolResults.sqlmap.parsed || [];
 
   progreso('trufflehog', 'running', 'Buscando secretos expuestos');
   const trufflehogResult = await ejecutarTrufflehog(

@@ -1,6 +1,6 @@
 const fs = require('fs');
 const { execFile } = require('child_process');
-const { esAssetEstatico } = require('./clasificadorFindings');
+const { esAssetEstatico } = require('../procesamiento/clasificadorFindings');
 const { normalizarEndpoint } = require('./gau');
 
 const WORDLISTS_CANDIDATAS = [

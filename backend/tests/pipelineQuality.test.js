@@ -1,18 +1,18 @@
 const assert = require('assert');
 const {
   construirInputHttpx,
-  deduplicarHttpxResultados,
-  parsearNucleiJsonl
+  deduplicarHttpxResultados
 } = require('../modules/reconocimiento');
-const { ejecutarGau, filtrarYPriorizarUrlsGau } = require('../modules/gau');
+const { parsearNucleiJsonl } = require('../modules/herramientas/nuclei');
+const { ejecutarGau, filtrarYPriorizarUrlsGau } = require('../modules/herramientas/gau');
 const {
   procesarFeroxRaw,
   esRutaInteresante,
   esPosibleVulnerabilidad
-} = require('../modules/feroxbuster');
-const { extraerFindingsDeterministas } = require('../modules/extractores');
-const { clasificarFindings } = require('../modules/clasificadorFindings');
-const { buildFindingGroups } = require('../modules/findingGroups');
+} = require('../modules/herramientas/feroxbuster');
+const { extraerFindingsDeterministas } = require('../modules/procesamiento/extractores');
+const { clasificarFindings } = require('../modules/procesamiento/clasificadorFindings');
+const { buildFindingGroups } = require('../modules/procesamiento/findingGroups');
 
 function testHttpxDedup() {
   const inputDemo = construirInputHttpx(

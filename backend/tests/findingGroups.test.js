@@ -1,9 +1,9 @@
 const assert = require('assert');
-const { calcularRiskScore } = require('../modules/scoring');
+const { calcularRiskScore } = require('../modules/procesamiento/scoring');
 const {
   buildFindingGroups,
   normalizeFindingClassification
-} = require('../modules/findingGroups');
+} = require('../modules/procesamiento/findingGroups');
 
 function group(findings) {
   return buildFindingGroups(findings.map(normalizeFindingClassification));

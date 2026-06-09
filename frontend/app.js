@@ -806,18 +806,45 @@ function renderSeverityChart(counts = {}) {
 
 function renderToolChart(items = []) {
   const max = Math.max(1, ...items.map(item => Number(item.value || 0)));
+  const topItems = items.slice(0, 6);
+  const rest = items.slice(6).reduce((sum, item) => sum + Number(item.value || 0), 0);
+  const donutItems = rest > 0 ? [...topItems, { label: 'otros', value: rest }] : topItems;
+  const total = donutItems.reduce((sum, item) => sum + Number(item.value || 0), 0);
+  const colors = ['#00FFD1', '#FF6B00', '#FFC247', '#AEB8CB', '#FF0055', '#7DD3FC', '#5F6C84'];
+  let offset = 0;
+  const segments = donutItems
+    .filter(item => Number(item.value || 0) > 0)
+    .map((item, index) => {
+      const value = Number(item.value || 0);
+      const start = offset;
+      const end = offset + (value / Math.max(1, total)) * 100;
+      offset = end;
+      return `${colors[index % colors.length]} ${start.toFixed(2)}% ${end.toFixed(2)}%`;
+    });
+  const donutBg = total > 0
+    ? `conic-gradient(${segments.join(', ')})`
+    : 'conic-gradient(rgba(174, 184, 203, 0.24) 0% 100%)';
+
   return `
-    <div class="chart-bars tool-chart">
-      ${items.length ? items.map((item, index) => {
-        const width = Math.max(4, Math.round((Number(item.value || 0) / max) * 100));
-        return `
-          <div class="chart-row tool-row tool-accent-${index % 4}">
-            <span>${escaparHtml(item.label)}</span>
-            <div class="chart-track"><i style="width:${escaparHtml(width)}%"></i></div>
-            <strong>${escaparHtml(item.value)}</strong>
-          </div>
-        `;
-      }).join('') : '<p class="empty">Sin datos de herramientas disponibles.</p>'}
+    <div class="tool-distribution">
+      <div class="tool-donut" style="background:${escaparHtml(donutBg)}" aria-label="Distribucion de hallazgos por herramienta">
+        <div class="tool-donut-center">
+          <strong>${escaparHtml(total)}</strong>
+          <span>total</span>
+        </div>
+      </div>
+      <div class="chart-bars tool-chart">
+        ${items.length ? items.map((item, index) => {
+          const width = Math.max(4, Math.round((Number(item.value || 0) / max) * 100));
+          return `
+            <div class="chart-row tool-row tool-accent-${index % 4}">
+              <span>${escaparHtml(item.label)}</span>
+              <div class="chart-track"><i style="width:${escaparHtml(width)}%"></i></div>
+              <strong>${escaparHtml(item.value)}</strong>
+            </div>
+          `;
+        }).join('') : '<p class="empty">Sin datos de herramientas disponibles.</p>'}
+      </div>
     </div>
   `;
 }

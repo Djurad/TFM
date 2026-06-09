@@ -4,18 +4,18 @@ const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env'), override: true });
 const { generarPdfRespuesta, generarPdfDesdeDatos } = require('./utils/pdf');
 const { ejecutarReconocimiento } = require('./modules/reconocimiento');
-const { enriquecerFindingsIA } = require('./modules/ia');
-const { normalizarFindings } = require('./modules/normalizacion');
-const { extraerFindingsDeterministas } = require('./modules/extractores');
-const { clasificarFindings } = require('./modules/clasificadorFindings');
-const { calcularRiskScore } = require('./modules/scoring');
-const { correlacionarFindings, normalizarUrl, origenYRuta, parametro } = require('./modules/correlacion');
+const { enriquecerFindingsIA } = require('./modules/procesamiento/ia');
+const { normalizarFindings } = require('./modules/procesamiento/normalizacion');
+const { extraerFindingsDeterministas } = require('./modules/procesamiento/extractores');
+const { clasificarFindings } = require('./modules/procesamiento/clasificadorFindings');
+const { calcularRiskScore } = require('./modules/procesamiento/scoring');
+const { correlacionarFindings, normalizarUrl, origenYRuta, parametro } = require('./modules/procesamiento/correlacion');
 const { crearScanLogger } = require('./modules/scanLogger');
 const {
   buildDashboardMetrics,
   buildFindingGroups,
   normalizeFindingsForReporting
-} = require('./modules/findingGroups');
+} = require('./modules/procesamiento/findingGroups');
 
 const app = express();
 const PORT = 3000;

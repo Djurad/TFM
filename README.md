@@ -13,9 +13,9 @@ El objetivo es el desarrollo de un sistema de apoyo al pentesting web automatiza
 El sistema sigue una arquitectura distribuida:
 
 - **Windows (host):** ejecuta Ollama (modelo de IA)  
-- **VM Ubuntu:** ejecuta backend y frontend  
+- **WSL Ubuntu:** ejecuta backend, frontend y herramientas de reconocimiento  
 
-La comunicación con la IA se realiza mediante HTTP en red local (modo Bridge).
+La comunicación con la IA se realiza mediante HTTP desde WSL hacia el servicio de Ollama en Windows.
 
 ---
 
@@ -53,31 +53,29 @@ Permitir conexiones al puerto **11434**:
 
 ---
 
-### 3. Máquina Virtual
+### 3. WSL Ubuntu
 
-Descargar la máquina virtual desde:
+Instalar y usar una distribución Ubuntu en WSL para ejecutar el backend, el frontend y las herramientas externas del pipeline.
 
-https://mega.nz/file/qg5lyLSJ#GnHkTm_CB2LKYAp0zaberoXwaJgXXLv96XaFEvUU7Kk
+Desde PowerShell:
 
-#### Configuración recomendada
+```powershell
+wsl --install -d Ubuntu
+```
 
-- Memoria RAM: **8 GB**
-- La máquina debe estar encendida antes de ejecutar el sistema
+Una vez instalado WSL, abrir Ubuntu y situarse en la carpeta del proyecto. Si el repositorio está en Windows, se puede acceder desde WSL mediante `/mnt/c/...`.
 
-#### Configuración de red (IMPORTANTE)
+Ejemplo:
 
-Configurar la VM en **modo Bridge (Adaptador Puente)**:
-
-1. Configuración de la VM  
-2. Red → Adaptador 1  
-3. Tipo: Adaptador puente  
-4. Seleccionar interfaz de red del host  
+```bash
+cd /mnt/c/Users/Diego/Documents/workspaceTFM/TFM
+```
 
 ---
 
 ## Configuración del backend
 
-Dentro de la **VM Ubuntu**, crear un archivo `.env` en la carpeta `backend/`:
+Dentro de **WSL Ubuntu**, crear un archivo `.env` en la carpeta `backend/`:
 
 ```
 OLLAMA_HOST=IP_DEL_HOST_WINDOWS
@@ -93,7 +91,7 @@ OLLAMA_HOST=192.168.1.100
 
 ## Ejecución del proyecto
 
-Dentro de la VM Ubuntu:
+Dentro de WSL Ubuntu:
 
 ```
 cd backend
@@ -111,29 +109,30 @@ http://localhost:3000
 
 ## Estructura del proyecto
 
-### backend/
-
-- `server.js` → rutas principales y servidor  
-- `.env` → configuración del entorno  
-
-#### modules/
-- `ia.js` → comunicación con Ollama  
-- `procesamiento.js` → tratamiento de datos  
-- `reconocimiento.js` → análisis de superficie de ataque  
-- `scoring.js` → priorización de riesgos  
-
-#### utils/
-- `pdf.js` → generación de informes en PDF  
-
-- `node_modules/` → dependencias  
-- `package.json` / `package-lock.json` → configuración  
-
----
-
-### frontend/
-
-- `index.html` → interfaz principal  
-- `app.js` → lógica de interacción con backend  
+```text
+TFM/
+├── backend/                  # API, orquestación del pipeline y generación de informes
+│   ├── server.js             # servidor Express y rutas principales
+│   ├── modules/
+│   │   ├── ia/               # comunicación con Ollama
+│   │   ├── reconocimiento/   # ejecución y parseo de herramientas de reconocimiento
+│   │   │   ├── analizadores/ # comprobaciones pasivas y análisis auxiliares
+│   │   │   └── herramientas/ # wrappers de subfinder, httpx, gau, nuclei, etc.
+│   │   ├── procesamiento/    # normalización, extracción y clasificación de hallazgos
+│   │   ├── priorizacion/     # scoring, correlación y agrupación de findings
+│   │   └── pdf/              # plantillas, estilos, gráficas y generación de PDF
+│   ├── tests/                # pruebas del backend y del pipeline
+│   └── tools/                # herramientas locales usadas por el backend
+├── frontend/
+│   ├── index.html            # interfaz principal
+│   └── app.js                # lógica de interacción con el backend
+├── logs/                     # salidas y evidencias de ejecuciones
+├── tools/                    # herramientas externas incluidas en el proyecto
+├── setup.sh                  # instalación base de dependencias
+├── herramientas.sh           # instalación/verificación de herramientas de pentesting
+├── package.json              # scripts y dependencias del proyecto
+└── .env.example              # ejemplo de configuración de entorno
+```
 
 ---
 
@@ -249,10 +248,10 @@ Feroxbuster registra binario, argumentos reales, wordlist usada, existencia de l
 ## Notas
 
 - Ollama se ejecuta en el host Windows  
-- La VM Ubuntu ejecuta backend y frontend  
+- WSL Ubuntu ejecuta backend, frontend y herramientas de reconocimiento  
 - Requisitos imprescindibles:
   - Ejecutar `OLLAMA_HOST=0.0.0.0 ollama serve`
-  - VM en modo Bridge  
+  - Tener WSL Ubuntu instalado y las herramientas del pipeline disponibles en `PATH`  
   - Puerto 11434 permitido en firewall  
 
 ---

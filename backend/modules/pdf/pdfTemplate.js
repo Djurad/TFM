@@ -1,6 +1,13 @@
+const fs = require('fs');
+const path = require('path');
 const { COLORS, SEVERITY, FONTS, PAGE } = require('./pdfStyles');
 const { drawDonutChart, drawHorizontalChart, drawRiskGauge, drawSeverityBars } = require('./pdfCharts');
 const { getAsset, normalizeSeverity, safeArray, text, truncate } = require('./pdfUtils');
+
+function getLogoPath() {
+  const logoPath = path.join(__dirname, '../../../frontend/assets/site-logo.png');
+  return fs.existsSync(logoPath) ? logoPath : null;
+}
 
 function pageBounds(doc) {
   return {
@@ -103,15 +110,18 @@ function drawCover(doc, report) {
     width: PAGE.contentWidth - 64
   });
 
+  const logoPath = getLogoPath();
+  if (logoPath) {
+    try {
+      doc.image(logoPath, left + PAGE.contentWidth - 126, 102, { fit: [92, 92] });
+    } catch {
+      // El logo es decorativo; si PDFKit no puede leerlo, el informe sigue generandose.
+    }
+  }
+
   doc.font(FONTS.bold).fontSize(34).fillColor(COLORS.text)
     .text('Informe de Auditoria de Vulnerabilidades Web', left + 32, 145, {
-      width: PAGE.contentWidth - 96,
-      lineGap: 3
-    });
-
-  doc.font(FONTS.regular).fontSize(11).fillColor(COLORS.muted)
-    .text('Documento tecnico de resultados, evidencias, correlaciones y prioridades de remediacion.', left + 32, 254, {
-      width: PAGE.contentWidth - 90,
+      width: PAGE.contentWidth - (logoPath ? 188 : 96),
       lineGap: 3
     });
 
@@ -316,19 +326,22 @@ function emptyPanel(doc, message) {
 }
 
 function findingHeight(doc, finding) {
-  const titleHeight = doc.font(FONTS.bold).fontSize(12).heightOfString(truncate(finding.title, 110), { width: PAGE.contentWidth - 32 });
-  const assetHeight = doc.font(FONTS.regular).fontSize(8).heightOfString(truncate(getAsset(finding), 118), { width: PAGE.contentWidth - 32 });
-  const evidenceHeight = doc.font(FONTS.mono).fontSize(7).heightOfString(truncate(finding.evidence || finding.raw_reference, 420), { width: PAGE.contentWidth - 32, lineGap: 1 });
+  const titleHeight = doc.font(FONTS.bold).fontSize(12).heightOfString(text(finding.title, 'Hallazgo sin titulo'), { width: PAGE.contentWidth - 32 });
+  const assetHeight = doc.font(FONTS.regular).fontSize(8).heightOfString(text(getAsset(finding)), { width: PAGE.contentWidth - 32 });
+  const evidenceHeight = doc.font(FONTS.mono).fontSize(7).heightOfString(text(finding.evidence || finding.raw_reference, 'Sin evidencia detallada disponible.'), { width: PAGE.contentWidth - 32, lineGap: 1 });
   const colW = (PAGE.contentWidth - 46) / 2;
-  const impactHeight = doc.font(FONTS.regular).fontSize(7.5).heightOfString(truncate(finding.impact, 210), { width: colW });
-  const recHeight = doc.font(FONTS.regular).fontSize(7.5).heightOfString(truncate(finding.recommendation, 210), { width: colW });
+  const impactHeight = doc.font(FONTS.regular).fontSize(7.5).heightOfString(text(finding.impact, 'No disponible'), { width: colW });
+  const recHeight = doc.font(FONTS.regular).fontSize(7.5).heightOfString(text(finding.recommendation, 'No disponible'), { width: colW });
+  const reasonHeight = finding.severityReason
+    ? doc.font(FONTS.regular).fontSize(7.2).heightOfString(text(finding.severityReason), { width: PAGE.contentWidth - 32, lineGap: 1 })
+    : 0;
   const correlationHeight = safeArray(finding.correlation_notes).length
     ? doc.font(FONTS.regular).fontSize(7).heightOfString(`Correlacion: ${truncate(finding.correlation_notes.join(' | '), 160)}`, { width: PAGE.contentWidth - 32 })
     : 0;
 
   return Math.max(
     170,
-    30 + titleHeight + 34 + 34 + assetHeight + 28 + Math.max(evidenceHeight, 20) + 30 + Math.max(impactHeight, recHeight, 20) + correlationHeight + 28
+    30 + titleHeight + 34 + 34 + assetHeight + 28 + Math.max(evidenceHeight, 20) + 30 + Math.max(impactHeight, recHeight, 20) + reasonHeight + correlationHeight + 42
   );
 }
 
@@ -342,7 +355,7 @@ function drawFindingCard(doc, finding, state) {
   panel(doc, left, y, PAGE.contentWidth, height, { fill: COLORS.panel, accent: severityColor(sev) });
   chip(doc, left + 16, y + 14, severityLabel(sev).toUpperCase(), severityColor(sev));
   chip(doc, left + 96, y + 14, state.toUpperCase(), state === 'Confirmada' ? COLORS.success : COLORS.medium);
-  doc.font(FONTS.bold).fontSize(12).fillColor(COLORS.text).text(truncate(finding.title, 112), left + 16, y + 40, {
+  doc.font(FONTS.bold).fontSize(12).fillColor(COLORS.text).text(text(finding.title, 'Hallazgo sin titulo'), left + 16, y + 40, {
     width: PAGE.contentWidth - 32
   });
   const titleBottom = doc.y;
@@ -356,12 +369,12 @@ function drawFindingCard(doc, finding, state) {
 
   const assetY = metaY + 38;
   doc.font(FONTS.bold).fontSize(7).fillColor(COLORS.subtle).text('ACTIVO AFECTADO', left + 16, assetY);
-  doc.font(FONTS.regular).fontSize(8).fillColor(COLORS.text).text(truncate(getAsset(finding), 118), left + 16, assetY + 12, { width: PAGE.contentWidth - 32 });
+  doc.font(FONTS.regular).fontSize(8).fillColor(COLORS.text).text(text(getAsset(finding)), left + 16, assetY + 12, { width: PAGE.contentWidth - 32 });
   const assetBottom = doc.y;
 
   const evidenceY = assetBottom + 14;
   doc.font(FONTS.bold).fontSize(7).fillColor(COLORS.subtle).text('EVIDENCIA TECNICA', left + 16, evidenceY);
-  doc.font(FONTS.mono).fontSize(7).fillColor(COLORS.muted).text(truncate(finding.evidence || finding.raw_reference, 420), left + 16, evidenceY + 12, {
+  doc.font(FONTS.mono).fontSize(7).fillColor(COLORS.muted).text(text(finding.evidence || finding.raw_reference, 'Sin evidencia detallada disponible.'), left + 16, evidenceY + 12, {
     width: PAGE.contentWidth - 32,
     lineGap: 1
   });
@@ -370,14 +383,25 @@ function drawFindingCard(doc, finding, state) {
   const bottomY = evidenceBottom + 18;
   const colW = (PAGE.contentWidth - 46) / 2;
   doc.font(FONTS.bold).fontSize(7).fillColor(COLORS.subtle).text('IMPACTO', left + 16, bottomY);
-  doc.font(FONTS.regular).fontSize(7.5).fillColor(COLORS.text).text(truncate(finding.impact, 210), left + 16, bottomY + 11, { width: colW });
+  doc.font(FONTS.regular).fontSize(7.5).fillColor(COLORS.text).text(text(finding.impact, 'No disponible'), left + 16, bottomY + 11, { width: colW });
   const impactBottom = doc.y;
-  doc.font(FONTS.bold).fontSize(7).fillColor(COLORS.subtle).text('RECOMENDACION', left + 28 + colW, bottomY);
-  doc.font(FONTS.regular).fontSize(7.5).fillColor(COLORS.text).text(truncate(finding.recommendation, 210), left + 28 + colW, bottomY + 11, { width: colW });
+  doc.font(FONTS.bold).fontSize(7).fillColor(COLORS.subtle).text('SOLUCION RECOMENDADA', left + 28 + colW, bottomY);
+  doc.font(FONTS.regular).fontSize(7.5).fillColor(COLORS.text).text(text(finding.recommendation, 'No disponible'), left + 28 + colW, bottomY + 11, { width: colW });
   const recommendationBottom = doc.y;
 
+  let extraBottom = Math.max(impactBottom, recommendationBottom);
+  if (finding.severityReason) {
+    const reasonY = extraBottom + 12;
+    doc.font(FONTS.bold).fontSize(7).fillColor(COLORS.subtle).text('CRITERIO DE CRITICIDAD', left + 16, reasonY);
+    doc.font(FONTS.regular).fontSize(7.2).fillColor(COLORS.muted).text(text(finding.severityReason), left + 16, reasonY + 11, {
+      width: PAGE.contentWidth - 32,
+      lineGap: 1
+    });
+    extraBottom = doc.y;
+  }
+
   if (safeArray(finding.correlation_notes).length) {
-    const correlationY = Math.max(impactBottom, recommendationBottom) + 12;
+    const correlationY = extraBottom + 12;
     doc.font(FONTS.regular).fontSize(7).fillColor(COLORS.low)
       .text(`Correlacion: ${truncate(finding.correlation_notes.join(' | '), 160)}`, left + 16, correlationY, { width: PAGE.contentWidth - 32 });
   }

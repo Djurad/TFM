@@ -213,7 +213,42 @@ function limpiarCampoIA(valor) {
   return typeof valor === 'string' ? valor.trim() : '';
 }
 
+function normalizarCriticidadIA(valor) {
+  const lower = limpiarCampoIA(valor).toLowerCase();
+  const mapa = {
+    critica: 'critical',
+    critico: 'critical',
+    critical: 'critical',
+    alta: 'high',
+    alto: 'high',
+    high: 'high',
+    media: 'medium',
+    medio: 'medium',
+    medium: 'medium',
+    baja: 'low',
+    bajo: 'low',
+    low: 'low',
+    informativa: 'info',
+    informativo: 'info',
+    informational: 'info',
+    info: 'info'
+  };
+
+  return mapa[lower] || '';
+}
+
+function direccionCambioSeveridad(original, nueva) {
+  const rank = { info: 0, low: 1, medium: 2, high: 3, critical: 4 };
+  const before = rank[original] ?? 0;
+  const after = rank[nueva] ?? before;
+  if (after > before) return 'upgraded';
+  if (after < before) return 'downgraded';
+  return 'unchanged';
+}
+
 function compactarFindingParaIA(finding) {
+  const baseSeverity = finding.baseSeverity || finding.finalSeverity || finding.severity;
+
   return {
     id: finding.id,
     tool: finding.tool,
@@ -221,10 +256,13 @@ function compactarFindingParaIA(finding) {
     title: finding.title,
     description: finding.description,
     severity: finding.severity,
+    baseSeverity,
+    finalSeverity: finding.finalSeverity || finding.severity,
     confidence: finding.confidence,
     isVulnerability: finding.isVulnerability,
     isFalsePositiveLikely: finding.isFalsePositiveLikely,
     falsePositiveReason: finding.falsePositiveReason,
+    severityReason: finding.severityReason || finding.severity_reason || '',
     cwe: finding.cwe,
     affected_asset: finding.affected_asset,
     affected_url: finding.affected_url,
@@ -236,12 +274,13 @@ function compactarFindingParaIA(finding) {
 function promptImpactoRecomendacion(target, tool, findings) {
   return `Analiza individualmente cada vulnerabilidad y devuelve SOLO JSON valido.
 No agrupes hallazgos. No uses una recomendacion generica repetida para todos.
-Devuelve exactamente este formato: {"items":[{"id":"","impact":"","recommendation":""}]}.
+Devuelve exactamente este formato: {"items":[{"id":"","impact":"","recommendation":"","severityReason":""}]}.
 Debe haber un item por cada id recibido.
 Conserva el id exacto.
-El campo impact debe explicar el impacto concreto de esa evidencia, parametro, URL o servicio.
+El campo impact debe explicar el impacto concreto de esa evidencia, parametro, URL o servicio y por que esa criticidad es razonable.
 El campo recommendation debe explicar como solucionarlo en ese caso concreto.
-Cada impact y recommendation debe mencionar algun dato concreto del hallazgo: parametro, ruta, payload, servicio o URL.
+El campo severityReason debe justificar de forma breve la criticidad elegida usando solo la evidencia disponible.
+Cada impact, recommendation y severityReason debe mencionar algun dato concreto del hallazgo: parametro, ruta, payload, servicio o URL.
 Si no puedes determinar impact o recommendation para un id, devuelve ese campo como cadena vacia.
 No inventes CVE, CVSS, CWE ni datos no presentes.
 Objetivo: ${target}
@@ -262,15 +301,20 @@ Devuelve SOLO JSON valido con este formato exacto:
   "motivo_falso_positivo": "",
   "impacto": "",
   "recomendacion": "",
+  "motivo_criticidad": "",
   "evidencia_resumida": ""
 }
 
 Reglas obligatorias:
 - No conviertas fingerprints, WAF detect, wildcard DNS o tecnologias detectadas en vulnerabilidades.
 - Si el hallazgo recibido no es una vulnerabilidad, es_vulnerabilidad debe ser false y criticidad debe ser info.
-- impacto debe explicar el impacto de ESTE caso, no de la vulnerabilidad en general.
+- Recibes severity/baseSeverity como gravedad propuesta por la herramienta. Debes revisarla segun evidencia, impacto, confianza, URL, parametro, payload y contexto.
+- Si la gravedad propuesta no encaja con la evidencia, devuelve en criticidad la gravedad corregida y explica el cambio en motivo_criticidad.
+- No subas ni bajes criticidad sin explicar el motivo tecnico.
+- impacto debe explicar el impacto de ESTE caso y por que la criticidad elegida encaja con la evidencia, no de la vulnerabilidad en general.
 - recomendacion debe explicar la correccion de ESTE caso, no una recomendacion generica.
-- impacto y recomendacion deben mencionar datos concretos presentes en el hallazgo: URL, ruta, parametro, payload, servicio o evidencia.
+- motivo_criticidad debe justificar brevemente la criticidad elegida sin inventar CVSS ni CVE.
+- impacto, recomendacion y motivo_criticidad deben mencionar datos concretos presentes en el hallazgo: URL, ruta, parametro, payload, servicio o evidencia.
 - Si hay parametro, mencionalo por nombre.
 - Si hay payload, menciona el tipo de payload o contexto donde se refleja.
 - No dejes impacto ni recomendacion vacios si es_vulnerabilidad es true.
@@ -366,8 +410,10 @@ function aplicarImpactosIA(findings, itemsIA) {
 
     mapa.set(id, {
       title: limpiarCampoIA(item.title || item.titulo),
+      suggestedSeverity: normalizarCriticidadIA(item.suggestedSeverity || item.suggested_severity || item.criticidad || item.severity || item.severidad),
       impact: limpiarCampoIA(item.impact || item.impacto),
       recommendation: limpiarCampoIA(item.recommendation || item.recomendacion),
+      severityReason: limpiarCampoIA(item.severityReason || item.severity_reason || item.motivo_criticidad || item.justificacion_criticidad),
       evidence: limpiarCampoIA(item.evidencia_resumida),
       isVulnerability: typeof item.es_vulnerabilidad === 'boolean' ? item.es_vulnerabilidad : undefined,
       isFalsePositiveLikely: typeof item.posible_falso_positivo === 'boolean' ? item.posible_falso_positivo : undefined,
@@ -386,11 +432,24 @@ function aplicarImpactosIA(findings, itemsIA) {
       };
     }
 
+    const baseSeverity = normalizarCriticidadIA(finding.baseSeverity || finding.severity) || 'info';
+    const aiSuggestedSeverity = enriquecido.suggestedSeverity || finding.aiSuggestedSeverity || finding.severity;
+    const finalSeverity = aiSuggestedSeverity || finding.severity;
+    const severityChangedByAI = Boolean(enriquecido.suggestedSeverity && finalSeverity !== finding.severity);
+
     return {
       ...finding,
       title: finding.title,
+      baseSeverity,
+      aiSuggestedSeverity,
+      finalSeverity,
+      severity: finalSeverity,
       impact: enriquecido.impact,
       recommendation: enriquecido.recommendation,
+      severityReason: enriquecido.severityReason || finding.severityReason,
+      severityChangedByAI,
+      severityChangeDirection: severityChangedByAI ? direccionCambioSeveridad(finding.severity, finalSeverity) : 'unchanged',
+      severityChangeReason: enriquecido.severityReason || finding.severityChangeReason || '',
       evidence: enriquecido.evidence || finding.evidence,
       isVulnerability: enriquecido.isVulnerability ?? finding.isVulnerability,
       isFalsePositiveLikely: enriquecido.isFalsePositiveLikely ?? finding.isFalsePositiveLikely,
@@ -475,7 +534,20 @@ Los campos impact y recommendation son obligatorios y no pueden estar vacios.`;
     }
   }
 
-  return finding;
+  const fallback = fallbackTecnico(finding);
+  const baseSeverity = normalizarCriticidadIA(finding.baseSeverity || finding.severity) || 'info';
+  return {
+    ...finding,
+    baseSeverity,
+    aiSuggestedSeverity: finding.aiSuggestedSeverity || finding.severity,
+    finalSeverity: finding.finalSeverity || finding.severity,
+    severity: finding.finalSeverity || finding.severity,
+    severityChangedByAI: finding.severityChangedByAI || false,
+    severityChangeDirection: finding.severityChangeDirection || 'unchanged',
+    impact: finding.impact || fallback.impact,
+    recommendation: finding.recommendation || fallback.recommendation,
+    severityReason: finding.severityReason || 'La criticidad se mantiene segun la evidencia tecnica disponible y la confianza de la herramienta.'
+  };
 }
 
 async function enriquecerFindingsIA(target, tool, findings, scanLogger = null) {

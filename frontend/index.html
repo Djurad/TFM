@@ -3,7 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
-  <title>EscanerWeb v2.0 · Pentesting Autónomo con IA</title>
+  <title>EscanerWeb</title>
+  <link rel="icon" type="image/png" href="assets/site-logo.png">
 
   <!-- Fuentes modernas -->
   <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;14..32,500;14..32,600;14..32,700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -42,14 +43,15 @@
     body {
       min-height: 100vh;
       background-color: var(--bg-deep);
-      background-image: 
-        linear-gradient(rgba(0, 255, 209, 0.02) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(0, 255, 209, 0.02) 1px, transparent 1px);
-      background-size: 32px 32px;
+      background-image:
+        radial-gradient(circle at 50% -12%, rgba(0, 255, 209, 0.10), transparent 32%),
+        linear-gradient(180deg, #07101A 0%, #0A0E17 42%, #07111B 100%);
+      background-size: auto;
       color: var(--text-primary);
       font-family: 'Inter', sans-serif;
       line-height: 1.5;
       scroll-behavior: smooth;
+      position: relative;
     }
 
     body::before,
@@ -58,32 +60,26 @@
       position: fixed;
       inset: 0;
       pointer-events: none;
-      z-index: 999;
+      z-index: 0;
     }
 
     body::before {
-      bottom: auto;
-      height: 140px;
-      background: linear-gradient(
-        180deg,
-        transparent 0%,
-        rgba(0, 255, 209, 0.04) 45%,
-        rgba(0, 255, 209, 0.12) 50%,
-        rgba(255, 0, 85, 0.05) 53%,
-        transparent 100%
-      );
-      animation: scanline 7s linear infinite;
+      width: 520px;
+      height: 520px;
+      inset: auto;
+      left: var(--cursor-x, 50vw);
+      top: var(--cursor-y, 18vh);
+      transform: translate(-50%, -50%);
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(0, 255, 209, 0.18), rgba(0, 118, 255, 0.08) 34%, transparent 68%);
+      filter: blur(4px);
+      opacity: 0.85;
       mix-blend-mode: screen;
+      transition: opacity 0.2s ease;
     }
 
     body::after {
-      opacity: 0.07;
-      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 160 160' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.75'/%3E%3C/svg%3E");
-    }
-
-    @keyframes scanline {
-      0% { transform: translateY(-160px); }
-      100% { transform: translateY(calc(100vh + 160px)); }
+      display: none;
     }
 
     /* Scrollbar personalizada */
@@ -101,41 +97,118 @@
     }
 
     /* Tipografía mono para código */
-    .terminal-text, code, pre, .priority-title, .log-line, .pipeline-step-label, .brand strong {
+    .terminal-text, code, pre, .priority-title, .log-line, .pipeline-step-label {
       font-family: 'JetBrains Mono', monospace;
     }
 
     /* TOPBAR */
     .topbar {
       border-bottom: 1px solid var(--border);
-      background: rgba(17, 24, 39, 0.92);
-      backdrop-filter: blur(12px);
+      background: #0A1420;
+      backdrop-filter: blur(16px);
       position: sticky;
       top: 0;
       z-index: 10;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.34), inset 0 -1px 0 rgba(0, 255, 209, 0.08);
     }
     .topbar-inner {
       width: min(1360px, calc(100% - 32px));
-      min-height: 64px;
+      min-height: 92px;
       margin: 0 auto;
-      display: flex;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
       align-items: center;
-      justify-content: space-between;
-      flex-wrap: wrap;
-      gap: 12px;
+      gap: 16px;
+      padding: 10px 0;
+    }
+    .brand {
+      min-width: 0;
     }
     .brand strong {
-      font-size: 1.35rem;
-      background: linear-gradient(135deg, #FFFFFF, var(--accent-cyan));
+      position: relative;
+      display: inline-block;
+      font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-weight: 800;
+      font-size: clamp(1.65rem, 3.1vw, 3rem);
+      line-height: 0.95;
+      background: linear-gradient(100deg, #EFFFFC 0%, var(--accent-cyan) 24%, #FFFFFF 42%, #36C8FF 56%, #EFFFFC 76%);
+      background-size: 220% 100%;
       background-clip: text;
       -webkit-background-clip: text;
       color: transparent;
-      letter-spacing: -0.5px;
+      letter-spacing: -2.8px;
+      filter: drop-shadow(0 0 18px rgba(0, 255, 209, 0.34));
+      animation: titleLightSweep 4.8s ease-in-out infinite;
     }
-    .brand span {
-      font-size: 0.7rem;
-      color: var(--text-secondary);
+    .brand strong::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      bottom: -9px;
+      width: min(255px, 86%);
+      height: 2px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, var(--accent-cyan), transparent);
+      box-shadow: 0 0 18px var(--accent-cyan-glow);
+      opacity: 0.86;
+      transform-origin: left;
+      animation: titleUnderlinePulse 3.2s ease-in-out infinite;
+    }
+    .brand-logo-wrap {
+      display: grid;
+      place-items: center;
+      width: clamp(104px, 10vw, 148px);
+      aspect-ratio: 1;
+      justify-self: center;
+      position: relative;
+      isolation: isolate;
+    }
+    .brand-logo-wrap::before {
+      content: "";
+      position: absolute;
+      inset: 20%;
+      z-index: -1;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(0, 255, 209, 0.22), transparent 68%);
+      filter: blur(13px);
+      animation: logoAura 3.6s ease-in-out infinite;
+    }
+    .brand-logo {
       display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      border: 0;
+      outline: 0;
+      box-shadow: none;
+      background: transparent;
+      animation: none;
+    }
+    .ai-status {
+      justify-self: end;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      width: max-content;
+      padding: 10px 16px;
+      border: 1px solid rgba(0, 255, 209, 0.42);
+      border-radius: 999px;
+      color: var(--text-primary);
+      background: linear-gradient(135deg, rgba(0, 255, 209, 0.16), rgba(0, 255, 209, 0.04));
+      box-shadow: 0 0 24px rgba(0, 255, 209, 0.18), inset 0 0 22px rgba(0, 255, 209, 0.06);
+      font-size: 0.7rem;
+      font-family: 'JetBrains Mono', monospace;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      white-space: nowrap;
+    }
+    .ai-status .status-light {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--accent-cyan);
+      box-shadow: 0 0 10px var(--accent-cyan), 0 0 24px var(--accent-cyan);
+      animation: motorPulse 1.6s ease-in-out infinite;
     }
     .terminal-subtle {
       font-size: 0.7rem;
@@ -145,6 +218,8 @@
 
     /* CONTENEDOR PRINCIPAL */
     .container {
+      position: relative;
+      z-index: 1;
       width: min(1360px, calc(100% - 32px));
       margin: 28px auto 48px;
       display: flex;
@@ -154,16 +229,57 @@
 
     /* PANEL CONSOLA */
     .panel {
+      --mouse-x: 50%;
+      --mouse-y: 50%;
+      --tilt-x: 0deg;
+      --tilt-y: 0deg;
+      --lift: 0px;
+      position: relative;
+      isolation: isolate;
+      overflow: hidden;
       background: var(--bg-panel);
       border: 1px solid var(--border);
       border-radius: 16px;
       padding: 20px;
       box-shadow: var(--shadow-card);
+      transform: perspective(900px) rotateX(var(--tilt-x)) rotateY(var(--tilt-y)) translateY(var(--lift));
       transition: border 0.2s, box-shadow 0.2s, transform 0.2s;
+    }
+    .panel::after,
+    .terminal-card::after,
+    .finding-card::after,
+    .correlation-row::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      z-index: 0;
+      pointer-events: none;
+      opacity: 0;
+      background: radial-gradient(
+        420px circle at var(--mouse-x) var(--mouse-y),
+        rgba(0, 255, 209, 0.16),
+        rgba(54, 200, 255, 0.06) 34%,
+        transparent 62%
+      );
+      transition: opacity 0.22s ease;
+    }
+    .panel > *,
+    .terminal-card > *,
+    .finding-card > *,
+    .correlation-row > * {
+      position: relative;
+      z-index: 1;
     }
     .panel:hover {
       border-color: var(--accent-cyan);
       box-shadow: var(--shadow-card), var(--shadow-glow);
+      --lift: -2px;
+    }
+    .panel:hover::after,
+    .terminal-card:hover::after,
+    .finding-card:hover::after,
+    .correlation-row:hover::after {
+      opacity: 1;
     }
     h1 {
       font-size: 0.85rem;
@@ -178,8 +294,7 @@
     }
     h1:hover,
     .terminal-card:hover h2,
-    .terminal-card:hover h3,
-    .brand:hover strong {
+    .terminal-card:hover h3 {
       animation: glitchText 820ms steps(2, end) 1;
       text-shadow: 1px 0 var(--accent-red), -1px 0 var(--accent-cyan);
     }
@@ -238,6 +353,19 @@
       display: inline-flex;
       align-items: center;
       gap: 8px;
+      position: relative;
+      overflow: hidden;
+    }
+    button::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      transform: translateX(-115%);
+      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+      transition: transform 0.45s ease;
+    }
+    button:hover:not(:disabled)::before {
+      transform: translateX(115%);
     }
     button:hover:not(:disabled) {
       background: var(--accent-cyan);
@@ -288,6 +416,26 @@
       0% { opacity: 0.6; }
       100% { opacity: 1; }
     }
+    @keyframes titleLightSweep {
+      0%, 100% { background-position: 0% 50%; text-shadow: 0 0 12px rgba(0, 255, 209, 0.18); }
+      48% { background-position: 100% 50%; text-shadow: 0 0 26px rgba(0, 255, 209, 0.46), 0 0 46px rgba(54, 200, 255, 0.18); }
+    }
+    @keyframes titleUnderlinePulse {
+      0%, 100% { transform: scaleX(0.72); opacity: 0.58; }
+      50% { transform: scaleX(1); opacity: 1; }
+    }
+    @keyframes logoAura {
+      0%, 100% { transform: scale(0.92); opacity: 0.55; }
+      50% { transform: scale(1.18); opacity: 1; }
+    }
+    @keyframes logoFloat {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-5px); }
+    }
+    @keyframes motorPulse {
+      0%, 100% { transform: scale(0.82); opacity: 0.72; }
+      50% { transform: scale(1.18); opacity: 1; }
+    }
     @keyframes toolPulse {
       0%, 100% { box-shadow: 0 0 7px var(--accent-amber-glow); opacity: 0.78; }
       50% { box-shadow: 0 0 18px var(--accent-amber-glow); opacity: 1; }
@@ -314,16 +462,32 @@
       gap: 18px;
     }
     .terminal-card {
+      --mouse-x: 50%;
+      --mouse-y: 50%;
+      --tilt-x: 0deg;
+      --tilt-y: 0deg;
+      --lift: 0px;
+      position: relative;
+      isolation: isolate;
       background: var(--bg-panel);
       border: 1px solid var(--border);
       border-radius: 20px;
       padding: 18px;
+      transform: perspective(900px) rotateX(var(--tilt-x)) rotateY(var(--tilt-y)) translateY(var(--lift));
       transition: transform 0.16s ease, border 0.2s, box-shadow 0.2s;
+    }
+    .terminal-card {
+      overflow: hidden;
     }
     .terminal-card:hover {
       border-color: rgba(0, 255, 209, 0.6);
       box-shadow: var(--shadow-card), var(--shadow-glow);
-      transform: translateY(-1px);
+      --lift: -3px;
+    }
+    .prioritized-section,
+    .prioritized-section:hover,
+    .finding-group {
+      transform: none !important;
     }
     .terminal-card h2, .terminal-card h3 {
       font-size: 0.7rem;
@@ -960,12 +1124,27 @@
       line-height: 1.5;
     }
     .finding-card {
+      --mouse-x: 50%;
+      --mouse-y: 50%;
+      --tilt-x: 0deg;
+      --tilt-y: 0deg;
+      --lift: 0px;
+      position: relative;
+      isolation: isolate;
+      overflow: hidden;
       border: 1px solid var(--border);
       border-left-width: 4px;
       border-radius: 10px;
       padding: 14px;
       display: grid;
       gap: 9px;
+      transform: perspective(900px) rotateX(var(--tilt-x)) rotateY(var(--tilt-y)) translateY(var(--lift));
+      transition: border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease, transform 0.18s ease;
+    }
+    .finding-card:hover {
+      border-color: rgba(0, 255, 209, 0.48);
+      box-shadow: 0 0 0 1px rgba(0, 255, 209, 0.1), 0 14px 28px rgba(0, 0, 0, 0.2);
+      --lift: -2px;
     }
     .finding-card header,
     .finding-meta {
@@ -1025,6 +1204,7 @@
       color: var(--text-secondary);
       font-size: 0.78rem;
       line-height: 1.45;
+      white-space: pre-wrap;
     }
     .finding-evidence {
       white-space: pre-wrap;
@@ -1087,6 +1267,71 @@
       background: rgba(95, 108, 132, 0.16);
     }
 
+    /* CORRELACIONES */
+    .correlations-card {
+      background:
+        radial-gradient(circle at top left, rgba(0, 255, 209, 0.09), transparent 32%),
+        var(--bg-panel);
+    }
+    .correlation-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 14px;
+    }
+    .correlation-row {
+      --mouse-x: 50%;
+      --mouse-y: 50%;
+      --tilt-x: 0deg;
+      --tilt-y: 0deg;
+      --lift: 0px;
+      position: relative;
+      overflow: hidden;
+      display: grid;
+      gap: 10px;
+      padding: 16px;
+      border: 1px solid rgba(0, 255, 209, 0.16);
+      border-left: 4px solid var(--accent-cyan);
+      border-radius: 16px;
+      background: rgba(10, 14, 23, 0.72);
+      transform: perspective(900px) rotateX(var(--tilt-x)) rotateY(var(--tilt-y)) translateY(var(--lift));
+      transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+    }
+    .correlation-row::before {
+      content: "";
+      position: absolute;
+      inset: -35% auto auto -18%;
+      width: 140px;
+      height: 140px;
+      border-radius: 50%;
+      background: currentColor;
+      opacity: 0.08;
+      pointer-events: none;
+    }
+    .correlation-row:hover {
+      --lift: -2px;
+      border-color: rgba(0, 255, 209, 0.42);
+      box-shadow: 0 18px 34px rgba(0, 0, 0, 0.28), 0 0 18px rgba(0, 255, 209, 0.08);
+    }
+    .correlation-row header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .correlation-row strong {
+      color: var(--text-primary);
+      line-height: 1.35;
+    }
+    .correlation-row p {
+      color: var(--text-secondary);
+      font-size: 0.84rem;
+      line-height: 1.55;
+    }
+    .correlation-row.severity-critical { color: var(--accent-red); border-left-color: var(--accent-red); }
+    .correlation-row.severity-high { color: #FF6B00; border-left-color: #FF6B00; }
+    .correlation-row.severity-medium { color: var(--accent-amber); border-left-color: var(--accent-amber); }
+    .correlation-row.severity-low { color: var(--green-neon); border-left-color: var(--green-neon); }
+    .correlation-row.severity-info { color: var(--accent-cyan); border-left-color: var(--accent-cyan); }
+
     /* TABLAS RESPONSIVE */
     .terminal-table-wrap {
       overflow-x: auto;
@@ -1104,6 +1349,30 @@
 
     /* RESPONSIVE */
     @media (max-width: 780px) {
+      .topbar-inner {
+        grid-template-columns: 1fr;
+        justify-items: center;
+        text-align: center;
+        min-height: 0;
+      }
+      .brand {
+        order: 2;
+      }
+      .brand strong {
+        letter-spacing: -1.5px;
+      }
+      .brand strong::after {
+        left: 6%;
+        transform-origin: center;
+      }
+      .brand-logo-wrap {
+        order: 1;
+        width: 128px;
+      }
+      .ai-status {
+        order: 3;
+        justify-self: center;
+      }
       .pipeline-stepper {
         flex-wrap: wrap;
         justify-content: flex-start;
@@ -1152,11 +1421,15 @@
   <header class="topbar">
     <div class="topbar-inner">
       <div class="brand">
-        <strong>〈 EscanerWeb v2.0 〉</strong>
-        <span>pentesting autónomo · motor IA</span>
+        <strong>EscanerWeb</strong>
       </div>
-      <div class="terminal-subtle">
-        <i class="fas fa-microchip"></i> Ollama · modo puente
+      <div class="brand-logo-wrap" aria-label="Logo EscanerWeb">
+        <img class="brand-logo" src="assets/header-logo.gif" alt="Logo EscanerWeb">
+      </div>
+      <div class="ai-status">
+        <span class="status-light" aria-hidden="true"></span>
+        <i class="fas fa-microchip"></i>
+        <span>Motor IA activo</span>
       </div>
     </div>
   </header>
@@ -1180,8 +1453,7 @@
 
   <script src="app.js"></script>
   <script>
-    // Pequeño fix para que los botones tengan iconos si app.js los sobreescribe
-    // Esto es opcional y no interfiere con tu lógica original.
+    // Interfaz visual restaurada sin interferir con la lógica original.
     console.log("Interfaz cyberpunk operativa cargada");
   </script>
 </body>

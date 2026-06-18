@@ -78,6 +78,12 @@ function normalizarFinding(item = {}, tool = 'otra', index = 0, target = '') {
     title,
     description: limpiarTexto(item.description || item.descripcion, 'Hallazgo identificado durante el analisis automatizado.'),
     severity,
+    baseSeverity: normalizarSeveridad(item.baseSeverity || item.base_severity || item.severity || item.severidad || item.criticidad),
+    aiSuggestedSeverity: normalizarSeveridad(item.aiSuggestedSeverity || item.ai_suggested_severity || item.suggestedSeverity || item.criticidad || item.severity || item.severidad),
+    finalSeverity: normalizarSeveridad(item.finalSeverity || item.final_severity || item.severity || item.severidad || item.criticidad),
+    severityChangedByAI: item.severityChangedByAI === true || item.severity_changed_by_ai === true,
+    severityChangeDirection: limpiarTexto(item.severityChangeDirection || item.severity_change_direction, 'unchanged'),
+    severityChangeReason: limpiarTexto(item.severityChangeReason || item.severity_change_reason, ''),
     confidence: normalizarConfianza(item.confidence || item.confianza, 'low'),
     cvss: normalizarCvss(item.cvss),
     cwe: limpiarTexto(item.cwe, null),
@@ -86,6 +92,7 @@ function normalizarFinding(item = {}, tool = 'otra', index = 0, target = '') {
     evidence: limpiarTexto(item.evidence || item.evidencia || item.evidencia_resumida, 'Sin evidencia detallada disponible.'),
     impact: limpiarTexto(item.impact || item.impacto, ''),
     recommendation: limpiarTexto(item.recommendation || item.recomendacion, ''),
+    severityReason: limpiarTexto(item.severityReason || item.severity_reason || item.motivo_criticidad || item.justificacion_criticidad, ''),
     type: limpiarTexto(item.type || item.tipo, severity === 'info' ? 'reconocimiento' : 'vulnerability'),
     isVulnerability: typeof item.isVulnerability === 'boolean'
       ? item.isVulnerability

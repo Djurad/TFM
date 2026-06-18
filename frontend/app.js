@@ -93,6 +93,50 @@ const severityLabels = {
   info: 'INFO'
 };
 
+function activarInteraccionVisual(scope = document) {
+  const selector = '.panel, .terminal-card, .finding-card, .correlation-row';
+  scope.querySelectorAll(selector).forEach(card => {
+    if (card.dataset.visualBound === 'true') return;
+    card.dataset.visualBound = 'true';
+
+    const maxTilt = 1.6;
+
+    card.addEventListener('mousemove', event => {
+      const rect = card.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      const y = event.clientY - rect.top;
+      const percentX = rect.width ? (x / rect.width) * 100 : 50;
+      const percentY = rect.height ? (y / rect.height) * 100 : 50;
+      const rotateY = ((x / Math.max(rect.width, 1)) - 0.5) * maxTilt;
+      const rotateX = -(((y / Math.max(rect.height, 1)) - 0.5) * maxTilt);
+
+      card.style.setProperty('--mouse-x', `${percentX.toFixed(2)}%`);
+      card.style.setProperty('--mouse-y', `${percentY.toFixed(2)}%`);
+      card.style.setProperty('--tilt-x', `${rotateX.toFixed(2)}deg`);
+      card.style.setProperty('--tilt-y', `${rotateY.toFixed(2)}deg`);
+    });
+
+    card.addEventListener('mouseleave', () => {
+      card.style.setProperty('--mouse-x', '50%');
+      card.style.setProperty('--mouse-y', '50%');
+      card.style.setProperty('--tilt-x', '0deg');
+      card.style.setProperty('--tilt-y', '0deg');
+    });
+  });
+}
+
+function activarHaloCursor() {
+  if (document.documentElement.dataset.cursorGlowBound === 'true') return;
+  document.documentElement.dataset.cursorGlowBound = 'true';
+
+  const moverHalo = event => {
+    document.documentElement.style.setProperty('--cursor-x', `${event.clientX}px`);
+    document.documentElement.style.setProperty('--cursor-y', `${event.clientY}px`);
+  };
+
+  window.addEventListener('pointermove', moverHalo, { passive: true });
+}
+
 function setEstado(texto, tipo = '') {
   estado.textContent = texto;
   estado.className = tipo ? `status ${tipo}` : 'status';
@@ -176,6 +220,7 @@ function actualizarPipelineVivo(evento = {}) {
     if (esEstadoFinal(evento.status)) completarPaso(IA_PHASE);
     setEstado(evento.message || '[*] analisis IA en curso...', esEstadoFinal(evento.status) ? 'success' : 'loading');
     resultados.innerHTML = renderPipelineTimeline(livePipeline);
+    activarInteraccionVisual(resultados);
     return;
   }
 
@@ -199,6 +244,7 @@ function actualizarPipelineVivo(evento = {}) {
 
   sincronizarProgresoDesdePipeline();
   resultados.innerHTML = renderPipelineTimeline(livePipeline);
+  activarInteraccionVisual(resultados);
 }
 
 function renderProgreso(evento = {}) {
@@ -567,7 +613,7 @@ function grupoVisualFinding(finding = {}) {
 }
 
 function descripcionCorta(finding = {}) {
-  return fallback(finding.description || finding.impact || buildAiReason(finding), 'Sin descripcion disponible.');
+  return fallback(finding.impact || finding.description || buildAiReason(finding), 'Sin impacto disponible.');
 }
 
 function evidenciaFinding(finding = {}) {
@@ -598,10 +644,16 @@ function renderFindingCard(finding = {}) {
       <div class="finding-meta">
         <span><i class="fas fa-layer-group"></i> ${escaparHtml(categoria)}</span>
         <span><i class="fas fa-crosshairs"></i> ${escaparHtml(fallback(finding.affected_url || finding.affected_asset || ultimoAnalisis?.target, '-'))}</span>
+        ${finding.severityChangedByAI
+          ? `<span><i class="fas fa-wand-magic-sparkles"></i> IA: ${escaparHtml(finding.baseSeverity || 'base')} -> ${escaparHtml(finding.finalSeverity || finding.severity || 'final')}</span>`
+          : ''}
       </div>
       <div class="finding-analysis">
         ${renderFindingDetail('Impacto', 'fa-bolt', finding.impact, 'No disponible. Requiere revision tecnica segun el contexto del activo.')}
-        ${renderFindingDetail('Recomendacion', 'fa-screwdriver-wrench', finding.recommendation, 'No disponible. Validar el hallazgo y aplicar la remediacion correspondiente.')}
+        ${renderFindingDetail('Solucion recomendada', 'fa-screwdriver-wrench', finding.recommendation, 'No disponible. Validar el hallazgo y aplicar la remediacion correspondiente.')}
+        ${finding.severityReason || finding.severity_reason || finding.aiReasoningSummary
+          ? renderFindingDetail('Criterio de criticidad', 'fa-scale-balanced', finding.severityReason || finding.severity_reason || finding.aiReasoningSummary, '')
+          : ''}
       </div>
       ${evidenciaFinding(finding) ? `<pre class="finding-evidence">${escaparHtml(evidenciaFinding(finding))}</pre>` : ''}
     </article>
@@ -862,12 +914,11 @@ function renderDashboard(data = {}, grupos = {}, findings = []) {
     <section class="security-dashboard">
       <div class="dashboard-head">
         <div>
-          <h2>Dashboard de riesgo</h2>
-          <p>Vista sintetica del analisis, severidades y actividad por herramienta.</p>
+          <h2>Resumen visual del analisis</h2>
+          <p>Riesgo, severidades y hallazgos por herramienta sin mezclarlo con la lista tecnica.</p>
         </div>
         <span class="terminal-badge status-ok">[ LIVE REPORT ]</span>
       </div>
-      ${renderMetricStrip(data, grupos)}
       <div class="dashboard-grid">
         <article class="terminal-card risk-visual-card">
           <div class="group-header">
@@ -1300,10 +1351,11 @@ function renderFindings(findings = [], groups = null) {
   resultados.innerHTML = `
     ${renderDashboard(data, grupos, allFindings)}
     ${renderPipelineTimeline(livePipeline.length ? livePipeline : (data.pipeline_timeline || []), data)}
-    ${renderCorrelaciones(data.correlations || [])}
     ${renderListaPriorizada(allFindings)}
     ${notices.map(n => `<p class="notice">${escaparHtml(n)}</p>`).join('')}
+    ${renderCorrelaciones(data.correlations || [])}
   `;
+  activarInteraccionVisual(resultados);
 
   resultados.querySelectorAll('.filter-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -1440,3 +1492,6 @@ if (btnNuevoAnalisis) {
     promptInput.focus();
   });
 }
+
+activarInteraccionVisual(document);
+activarHaloCursor();

@@ -8,6 +8,7 @@ const {
   normalizarFindings,
   parsearJsonIAFlexible
 } = require('../procesamiento/normalizacion');
+const { getFinalStatus } = require('../priorizacion/findingGroups');
 
 const MODEL = process.env.OLLAMA_MODEL || 'llama3';
 const OLLAMA_REINTENTOS = 3;
@@ -246,6 +247,94 @@ function direccionCambioSeveridad(original, nueva) {
   return 'unchanged';
 }
 
+function tieneEvidenciaConcreta(finding = {}) {
+  return Boolean(
+    finding.payload ||
+    finding.dbms ||
+    finding.parametro ||
+    finding.parameter ||
+    finding.param ||
+    /payload|poc|triggered|matched-at|dbms|extracted|vulnerable/i.test(String(finding.evidence || ''))
+  );
+}
+
+function validarDecisionSeveridadIA(finding = {}, aiResult = {}) {
+  const baseSeverity = normalizarCriticidadIA(finding.baseSeverity || finding.finalSeverity || finding.severity) || 'info';
+  const suggestedSeverity = normalizarCriticidadIA(aiResult.suggestedSeverity || aiResult.severity || aiResult.criticidad) || baseSeverity;
+  const status = getFinalStatus(finding);
+  const tool = String(finding.tool || '').toLowerCase();
+  const type = String(finding.type || '').toLowerCase();
+  const text = [
+    finding.title,
+    finding.description,
+    finding.evidence,
+    finding.affected_url,
+    finding.affected_asset,
+    aiResult.severityReason
+  ].filter(Boolean).join(' ').toLowerCase();
+  const reason = limpiarCampoIA(aiResult.severityReason || aiResult.classificationReason || aiResult.aiReasoningSummary);
+  const hasReason = reason.length >= 24;
+  let finalSeverity = suggestedSeverity;
+  let validationNote = '';
+
+  // La IA puede ajustar criticidad, pero estas reglas evitan incoherencias evidentes:
+  // GF sigue siendo candidato, hardening sigue siendo configuracion defensiva y
+  // superficie expuesta no pasa a critica/alta sin evidencia de impacto sensible.
+  if (!hasReason && suggestedSeverity !== baseSeverity) {
+    finalSeverity = baseSeverity;
+    validationNote = 'Cambio de criticidad descartado: la IA no justifico el ajuste con suficiente detalle.';
+  }
+
+  if (status === 'candidate' && ['critical', 'high'].includes(finalSeverity)) {
+    finalSeverity = 'medium';
+    validationNote = validationNote || 'Candidato GF limitado a severidad media hasta validacion tecnica.';
+  }
+
+  if (status === 'hardening' && finalSeverity === 'critical') {
+    finalSeverity = 'medium';
+    validationNote = validationNote || 'Hardening aislado no se marca como critico sin cadena explotable demostrada.';
+  }
+
+  if (status === 'surface' && ['critical', 'high'].includes(finalSeverity) && !/admin|panel|secret|token|credential|sensible|database|db|internal/.test(text)) {
+    finalSeverity = 'medium';
+    validationNote = validationNote || 'Superficie expuesta limitada: no hay evidencia de servicio sensible o explotacion.';
+  }
+
+  if (tool === 'sqlmap' && /possible_sqli/i.test(String(finding.source_status || finding.status || '')) && !tieneEvidenciaConcreta(finding) && ['critical', 'high'].includes(finalSeverity)) {
+    finalSeverity = 'medium';
+    validationNote = validationNote || 'SQLMap solo indica posible SQLi sin payload, DBMS, parametro vulnerable ni extraccion.';
+  }
+
+  if ((tool === 'headers' || type.includes('header')) && finalSeverity === 'critical' && !/xss|sesion|session|cookie|cadena|correlacion/.test(text)) {
+    finalSeverity = 'medium';
+    validationNote = validationNote || 'Cabecera ausente aislada no justifica severidad critica.';
+  }
+
+  return {
+    baseSeverity,
+    aiSuggestedSeverity: suggestedSeverity,
+    finalSeverity,
+    severityChangedByAI: finalSeverity !== baseSeverity,
+    severityChangeDirection: direccionCambioSeveridad(baseSeverity, finalSeverity),
+    severityChangeReason: validationNote || reason,
+    validationNote
+  };
+}
+
+function validateAISeverityDecision(finding = {}, aiResult = {}) {
+  return validarDecisionSeveridadIA(finding, aiResult);
+}
+
+function logAISeverity(scanLogger, label, payload = {}) {
+  const inline = Object.entries(payload)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(' ');
+  console.log(`${label}${inline ? ` ${inline}` : ''}`);
+  if (scanLogger?.variable) {
+    scanLogger.variable(label.replace(/[\[\]-]+/g, '').replace(/\s+/g, '_').toLowerCase(), payload);
+  }
+}
+
 function compactarFindingParaIA(finding) {
   const baseSeverity = finding.baseSeverity || finding.finalSeverity || finding.severity;
 
@@ -432,24 +521,22 @@ function aplicarImpactosIA(findings, itemsIA) {
       };
     }
 
-    const baseSeverity = normalizarCriticidadIA(finding.baseSeverity || finding.severity) || 'info';
-    const aiSuggestedSeverity = enriquecido.suggestedSeverity || finding.aiSuggestedSeverity || finding.severity;
-    const finalSeverity = aiSuggestedSeverity || finding.severity;
-    const severityChangedByAI = Boolean(enriquecido.suggestedSeverity && finalSeverity !== finding.severity);
+    const validation = validateAISeverityDecision(finding, enriquecido);
 
     return {
       ...finding,
       title: finding.title,
-      baseSeverity,
-      aiSuggestedSeverity,
-      finalSeverity,
-      severity: finalSeverity,
+      baseSeverity: validation.baseSeverity,
+      aiSuggestedSeverity: validation.aiSuggestedSeverity,
+      finalSeverity: validation.finalSeverity,
+      severity: validation.finalSeverity,
       impact: enriquecido.impact,
       recommendation: enriquecido.recommendation,
-      severityReason: enriquecido.severityReason || finding.severityReason,
-      severityChangedByAI,
-      severityChangeDirection: severityChangedByAI ? direccionCambioSeveridad(finding.severity, finalSeverity) : 'unchanged',
-      severityChangeReason: enriquecido.severityReason || finding.severityChangeReason || '',
+      severityReason: validation.severityChangeReason || enriquecido.severityReason || finding.severityReason,
+      aiReasoningSummary: validation.severityChangeReason || enriquecido.severityReason || finding.aiReasoningSummary || '',
+      severityChangedByAI: validation.severityChangedByAI,
+      severityChangeDirection: validation.severityChangeDirection,
+      severityChangeReason: validation.severityChangeReason || finding.severityChangeReason || '',
       evidence: enriquecido.evidence || finding.evidence,
       isVulnerability: enriquecido.isVulnerability ?? finding.isVulnerability,
       isFalsePositiveLikely: enriquecido.isFalsePositiveLikely ?? finding.isFalsePositiveLikely,
@@ -499,6 +586,13 @@ function normalizarComparacion(texto) {
 }
 
 async function enriquecerFindingIndividual(target, tool, finding, scanLogger = null) {
+  logAISeverity(scanLogger, '[AI-SEVERITY-START]', {
+    findingId: finding.id,
+    tool,
+    baseSeverity: finding.baseSeverity || finding.severity,
+    technicalStatus: getFinalStatus(finding)
+  });
+
   for (let intento = 1; intento <= INTENTOS_ENRIQUECIMIENTO_IA; intento++) {
     const findingCompacto = compactarFindingParaIA(finding);
     const promptBase = promptImpactoRecomendacionIndividual(target, tool, findingCompacto);
@@ -530,24 +624,45 @@ Los campos impact y recommendation son obligatorios y no pueden estar vacios.`;
     }
 
     if (enriquecido.impact && enriquecido.recommendation) {
+      logAISeverity(scanLogger, '[AI-SEVERITY-RESULT]', {
+        findingId: finding.id,
+        baseSeverity: enriquecido.baseSeverity,
+        aiSuggestedSeverity: enriquecido.aiSuggestedSeverity,
+        finalSeverity: enriquecido.finalSeverity,
+        changed: enriquecido.severityChangedByAI
+      });
+      logAISeverity(scanLogger, '[AI-SEVERITY-END]', { findingId: finding.id });
       return enriquecido;
     }
   }
 
   const fallback = fallbackTecnico(finding);
   const baseSeverity = normalizarCriticidadIA(finding.baseSeverity || finding.severity) || 'info';
-  return {
+  const validation = validateAISeverityDecision(finding, {
+    suggestedSeverity: finding.aiSuggestedSeverity || finding.finalSeverity || finding.severity,
+    severityReason: finding.severityReason || 'La criticidad se mantiene segun la evidencia tecnica disponible y la confianza de la herramienta.'
+  });
+  const fallbackFinding = {
     ...finding,
-    baseSeverity,
-    aiSuggestedSeverity: finding.aiSuggestedSeverity || finding.severity,
-    finalSeverity: finding.finalSeverity || finding.severity,
-    severity: finding.finalSeverity || finding.severity,
-    severityChangedByAI: finding.severityChangedByAI || false,
-    severityChangeDirection: finding.severityChangeDirection || 'unchanged',
+    baseSeverity: validation.baseSeverity || baseSeverity,
+    aiSuggestedSeverity: validation.aiSuggestedSeverity || finding.aiSuggestedSeverity || finding.severity,
+    finalSeverity: validation.finalSeverity || finding.finalSeverity || finding.severity,
+    severity: validation.finalSeverity || finding.finalSeverity || finding.severity,
+    severityChangedByAI: validation.severityChangedByAI || finding.severityChangedByAI || false,
+    severityChangeDirection: validation.severityChangeDirection || finding.severityChangeDirection || 'unchanged',
     impact: finding.impact || fallback.impact,
     recommendation: finding.recommendation || fallback.recommendation,
-    severityReason: finding.severityReason || 'La criticidad se mantiene segun la evidencia tecnica disponible y la confianza de la herramienta.'
+    severityReason: validation.severityChangeReason || finding.severityReason || 'La criticidad se mantiene segun la evidencia tecnica disponible y la confianza de la herramienta.'
   };
+  logAISeverity(scanLogger, '[AI-SEVERITY-RESULT]', {
+    findingId: finding.id,
+    baseSeverity: fallbackFinding.baseSeverity,
+    aiSuggestedSeverity: fallbackFinding.aiSuggestedSeverity,
+    finalSeverity: fallbackFinding.finalSeverity,
+    changed: fallbackFinding.severityChangedByAI
+  });
+  logAISeverity(scanLogger, '[AI-SEVERITY-END]', { findingId: finding.id });
+  return fallbackFinding;
 }
 
 async function enriquecerFindingsIA(target, tool, findings, scanLogger = null) {
@@ -665,6 +780,7 @@ module.exports = {
   generarJsonIA,
   analizarHerramientaIA,
   enriquecerFindingsIA,
+  validateAISeverityDecision,
   generarSeccionInformeIA,
   analizarEndpointsIA,
   filtrarEndpointsParaIA,

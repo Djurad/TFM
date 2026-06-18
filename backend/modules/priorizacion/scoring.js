@@ -6,14 +6,20 @@ const PESOS_SEVERIDAD = {
   critical: 10
 };
 
-const { normalizeFindingClassification, normalizeSeverity } = require('./findingGroups');
+const {
+  getFinalSeverity,
+  getFinalStatus,
+  normalizeFindingClassification
+} = require('./findingGroups');
 
 function obtenerCriticidadHallazgo(severidad) {
   return PESOS_SEVERIDAD[severidad] || 0;
 }
 
 function esHallazgoPuntuable(hallazgo = {}) {
-  return hallazgo.isVulnerability === true &&
+  const finalStatus = getFinalStatus(hallazgo);
+  return ['confirmed', 'possible'].includes(finalStatus) &&
+    hallazgo.isVulnerability === true &&
     ['high', 'medium'].includes(hallazgo.confidence) &&
     hallazgo.isFalsePositiveLikely !== true &&
     !['reconocimiento', 'surface', 'discarded', 'hardening'].includes(hallazgo.type);
@@ -46,7 +52,7 @@ function calcularDistribucionSeveridad(hallazgos) {
   };
 
   hallazgos.filter(esHallazgoPuntuable).forEach(h => {
-    const severity = h.severity || h.severidad;
+    const severity = getFinalSeverity(h);
     if (distribucion[severity] !== undefined) {
       distribucion[severity]++;
     }
@@ -93,7 +99,7 @@ function aplicarScoring(datos) {
 
   const hallazgos = datos.hallazgos.map(hallazgo => {
     const criticidad = esHallazgoPuntuable(hallazgo)
-      ? obtenerCriticidadHallazgo(hallazgo.severity || hallazgo.severidad)
+      ? obtenerCriticidadHallazgo(getFinalSeverity(hallazgo))
       : 0;
 
     return {
@@ -200,17 +206,17 @@ function sumarConCap(acumulado, key, valor, caps) {
 function puntuarFinding(finding = {}, acumulado, caps) {
   const tool = String(finding.tool || '').toLowerCase();
   const type = String(finding.type || '').toLowerCase();
-  const severity = String(finding.severity || 'info').toLowerCase();
   const confidence = String(finding.confidence || 'low').toLowerCase();
 
   const normalized = normalizeFindingClassification(finding);
   const normalizedType = String(normalized.type || '').toLowerCase();
   const category = String(normalized.category || '').toLowerCase();
-  const normalizedSeverity = normalizeSeverity(normalized.severity);
+  const normalizedSeverity = getFinalSeverity(normalized);
+  const finalStatus = getFinalStatus(normalized);
   const normalizedConfidence = String(normalized.confidence || 'low').toLowerCase();
 
   if (normalizedType === 'discarded' || normalizedType === 'false_positive' || normalized.isFalsePositiveLikely) return 0;
-  if (normalizedType === 'gf_candidate' || category === 'candidate' || tool === 'gf') {
+  if (finalStatus === 'candidate' || normalizedType === 'gf_candidate' || category === 'candidate' || tool === 'gf') {
     return sumarConCap(acumulado, 'gf', normalizedSeverity === 'medium' ? 1.5 : 1, caps);
   }
 
@@ -225,25 +231,25 @@ function puntuarFinding(finding = {}, acumulado, caps) {
     return 0;
   }
 
-  if (normalizedType === 'hardening' || category === 'hardening' || HARDENING_TYPES_SCORE.has(type)) {
+  if (finalStatus === 'hardening' || normalizedType === 'hardening' || category === 'hardening' || HARDENING_TYPES_SCORE.has(type)) {
     const valor = normalizedSeverity === 'medium' ? 4 : normalizedSeverity === 'low' ? 2 : normalizedSeverity === 'high' ? 8 : 0;
     return sumarConCap(acumulado, 'hardening', valor, caps);
   }
 
-  if (normalizedType === 'attack_surface' || category === 'attack_surface' || type === 'surface') {
+  if (finalStatus === 'surface' || normalizedType === 'attack_surface' || category === 'attack_surface' || type === 'surface') {
     return sumarConCap(acumulado, 'surface', normalizedSeverity === 'medium' ? 5 : 2, caps);
   }
 
-  if (normalizedType === 'informational' || normalizedSeverity === 'info' || normalized.isVulnerability !== true) return 0;
+  if (finalStatus === 'informational' || normalizedType === 'informational' || normalizedSeverity === 'info' || normalized.isVulnerability !== true) return 0;
 
-  if (normalizedType === 'confirmed_vulnerability' || normalizedConfidence === 'high') {
+  if (finalStatus === 'confirmed' || normalizedType === 'confirmed_vulnerability' || normalizedConfidence === 'high') {
     if (normalizedSeverity === 'critical') return 45;
     if (normalizedSeverity === 'high') return 35;
     if (normalizedSeverity === 'medium') return 22;
     if (normalizedSeverity === 'low') return 10;
   }
 
-  if (normalizedType === 'possible_vulnerability' || normalizedConfidence === 'medium') {
+  if (finalStatus === 'possible' || normalizedType === 'possible_vulnerability' || normalizedConfidence === 'medium') {
     if (normalizedSeverity === 'high') return 15;
     if (normalizedSeverity === 'medium') return 8;
     if (normalizedSeverity === 'low') return 3;

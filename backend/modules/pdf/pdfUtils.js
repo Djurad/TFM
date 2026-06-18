@@ -1,7 +1,9 @@
 const {
   buildDashboardMetrics,
   buildFindingGroups,
+  buildImpactText,
   canonicalToolName,
+  getFinalSeverity,
   normalizeSeverity,
   percentage,
   safeArray,
@@ -300,9 +302,9 @@ function interestingSurface(groups, context = {}) {
 }
 
 function buildRecommendations(groups) {
-  const critical = groups.confirmed.filter(f => ['critical', 'high'].includes(normalizeSeverity(f.severity)));
+  const critical = groups.confirmed.filter(f => ['critical', 'high'].includes(getFinalSeverity(f)));
   const shortTerm = [...groups.confirmed, ...groups.possible]
-    .filter(f => ['medium', 'high', 'critical'].includes(normalizeSeverity(f.severity)));
+    .filter(f => ['medium', 'high', 'critical'].includes(getFinalSeverity(f)));
   const manual = [...groups.possible, ...groups.gfCandidates]
     .filter(f => isGfCandidate(f) || String(f.confidence || '').toLowerCase() === 'medium' || f.requiresManualValidation);
 
@@ -410,6 +412,15 @@ function analysisLimitations(context = {}) {
 
 function prepareReportData(target, findings = [], context = {}) {
   const groups = buildGroups(safeArray(findings));
+  const normalizedFindings = [
+    ...groups.confirmed,
+    ...groups.possible,
+    ...groups.gfCandidates,
+    ...groups.hardening,
+    ...groups.attackSurface,
+    ...groups.informational,
+    ...groups.discarded
+  ];
   const generatedAt = new Date();
   const toolResults = context.toolResults || context.tool_results || {};
   const toolCounters = context.toolCounters || context.tool_counters || {};
@@ -418,7 +429,7 @@ function prepareReportData(target, findings = [], context = {}) {
     ...context,
     correlations
   });
-  const dashboardMetrics = buildDashboardMetrics(findings, toolResults);
+  const dashboardMetrics = buildDashboardMetrics(normalizedFindings, toolResults);
 
   return {
     target: text(target, 'No disponible'),
@@ -433,7 +444,7 @@ function prepareReportData(target, findings = [], context = {}) {
     groups,
     metrics: deriveMetrics(groups, context),
     dashboardMetrics,
-    toolChart: summarizeTools(toolResults, safeArray(findings)).slice(0, 10),
+    toolChart: summarizeTools(toolResults, normalizedFindings).slice(0, 10),
     categoryChart: categoryDistribution(groups),
     correlations,
     timeline,
@@ -442,7 +453,7 @@ function prepareReportData(target, findings = [], context = {}) {
     gfCandidates: context.gfCandidates || context.gf_candidates || {},
     interestingSurface: interestingSurface(groups, context),
     recommendations: buildRecommendations(groups),
-    allFindings: safeArray(findings),
+    allFindings: normalizedFindings,
     notices: [context.sqlmap_notice, context.ai_notice].filter(Boolean),
     limitations: analysisLimitations({ ...context, toolResults, toolCounters })
   };
@@ -451,6 +462,8 @@ function prepareReportData(target, findings = [], context = {}) {
 module.exports = {
   SEVERITY_ORDER,
   getAsset,
+  getFinalSeverity,
+  buildImpactText,
   isGfCandidate,
   normalizeSeverity,
   percentage,

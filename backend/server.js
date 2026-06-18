@@ -14,7 +14,8 @@ const { crearScanLogger } = require('./scanLogger');
 const {
   buildDashboardMetrics,
   buildFindingGroups,
-  normalizeFindingsForReporting
+  normalizeFindingsForReporting,
+  reconcileFindings
 } = require('./modules/priorizacion/findingGroups');
 
 const app = express();
@@ -410,8 +411,9 @@ app.post('/analizar', async (req, res) => {
 
     const findingsDeduplicadosBase = deduplicarFindings(findings);
     const correlacion = correlacionarFindings(findingsDeduplicadosBase, toolResults);
-    const findingsDeduplicados = normalizeFindingsForReporting(correlacion.findings);
-    const grupos = agruparFindings(findingsDeduplicados);
+    const reconciliacion = reconcileFindings(correlacion.findings);
+    const findingsDeduplicados = reconciliacion.findings;
+    const grupos = reconciliacion.groups;
     const findingsInforme = [
       ...grupos.confirmed,
       ...grupos.possible
@@ -610,8 +612,9 @@ app.post('/analizar-stream', async (req, res) => {
     scanLogger.variable('findingsDeduplicadosBase', findingsDeduplicadosBase);
     const correlacion = correlacionarFindings(findingsDeduplicadosBase, toolResults);
     scanLogger.variable('correlacion', correlacion);
-    const findingsDeduplicados = normalizeFindingsForReporting(correlacion.findings);
-    const grupos = agruparFindings(findingsDeduplicados);
+    const reconciliacion = reconcileFindings(correlacion.findings, { logger: scanLogger });
+    const findingsDeduplicados = reconciliacion.findings;
+    const grupos = reconciliacion.groups;
     scanLogger.variable('findingsDeduplicados', findingsDeduplicados);
     scanLogger.variable('grupos', grupos);
     const findingsInforme = [
@@ -686,9 +689,10 @@ app.post('/generar-informe', async (req, res) => {
       return res.status(400).json({ error: 'Debes enviar un array de findings.' });
     }
 
-    const findings = normalizeFindingsForReporting(
+    const findingsNormalizados = normalizeFindingsForReporting(
       clasificarFindings(normalizarFindings(req.body.findings, 'otra', target.trim()))
     );
+    const findings = reconcileFindings(findingsNormalizados).findings;
     generarPdfAuditoria(res, target.trim(), findings, {
       gfCandidates: req.body.gf_candidates || {},
       toolResults: req.body.tool_results || {},

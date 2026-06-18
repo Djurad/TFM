@@ -1,4 +1,5 @@
 const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'info'];
+const STATUS_ORDER = ['confirmed', 'possible', 'candidate', 'hardening', 'surface', 'informational', 'discarded'];
 const SEVERITY_RANK = {
   critical: 4,
   high: 3,
@@ -44,21 +45,190 @@ function safeArray(value) {
   return Array.isArray(value) ? value : [];
 }
 
+function normalizeKey(value) {
+  return String(value || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[-\s]+/g, '_')
+    .trim();
+}
+
 function normalizeSeverity(value, fallback = 'info') {
-  const lower = String(value || fallback).toLowerCase();
+  if ((value === null || value === undefined || value === '') && fallback === '') return '';
+  const lower = normalizeKey(value || fallback);
   const map = {
+    critical: 'critical',
     critica: 'critical',
     critico: 'critical',
+    criticas: 'critical',
+    criticos: 'critical',
+    high: 'high',
     alta: 'high',
     alto: 'high',
+    altas: 'high',
+    altos: 'high',
+    medium: 'medium',
     media: 'medium',
     medio: 'medium',
+    medias: 'medium',
+    medios: 'medium',
+    low: 'low',
     baja: 'low',
     bajo: 'low',
-    informational: 'info'
+    bajas: 'low',
+    bajos: 'low',
+    informational: 'info',
+    informativo: 'info',
+    informativa: 'info',
+    info: 'info'
   };
   const normalized = map[lower] || lower;
-  return SEVERITY_ORDER.includes(normalized) ? normalized : 'info';
+  if (SEVERITY_ORDER.includes(normalized)) return normalized;
+  if (fallback && fallback !== value) return normalizeSeverity(fallback, 'info');
+  return 'info';
+}
+
+function normalizeStatus(value, fallback = '') {
+  const lower = normalizeKey(value || fallback);
+  const map = {
+    confirmed: 'confirmed',
+    confirmada: 'confirmed',
+    confirmado: 'confirmed',
+    verified: 'confirmed',
+    vulnerable: 'confirmed',
+    exploitable: 'confirmed',
+    confirmed_sqli: 'confirmed',
+    confirmed_vulnerability: 'confirmed',
+    possible: 'possible',
+    posible: 'possible',
+    suspicious: 'possible',
+    possible_sqli: 'possible',
+    possible_vulnerability: 'possible',
+    requires_manual_validation: 'possible',
+    candidate: 'candidate',
+    candidato: 'candidate',
+    candidata: 'candidate',
+    gf: 'candidate',
+    gf_candidate: 'candidate',
+    hardening: 'hardening',
+    defensive_configuration: 'hardening',
+    configuracion: 'hardening',
+    surface: 'surface',
+    superficie: 'surface',
+    attack_surface: 'surface',
+    exposed_port: 'surface',
+    info: 'informational',
+    informational: 'informational',
+    informativo: 'informational',
+    informativa: 'informational',
+    reconocimiento: 'informational',
+    discarded: 'discarded',
+    descartado: 'discarded',
+    descartada: 'discarded',
+    false_positive: 'discarded'
+  };
+  const normalized = map[lower] || lower;
+  if (STATUS_ORDER.includes(normalized)) return normalized;
+  if (fallback && fallback !== value) return normalizeStatus(fallback, '');
+  return '';
+}
+
+function inferStatusFromFinding(finding = {}) {
+  const type = normalizeKey(finding.type || finding.tipo);
+  const category = normalizeKey(finding.category || finding.categoria);
+  const tool = normalizeKey(finding.tool || finding.herramienta);
+
+  if (type === 'confirmed_vulnerability') return 'confirmed';
+  if (type === 'possible_vulnerability') return 'possible';
+  if (type === 'gf_candidate' || category === 'candidate' || tool === 'gf') return 'candidate';
+  if (type === 'hardening' || category === 'hardening' || HARDENING_TYPES.has(type) || HARDENING_TOOLS.has(tool)) return 'hardening';
+  if (type === 'attack_surface' || type === 'surface' || category === 'attack_surface' || ATTACK_SURFACE_TYPES.has(type)) return 'surface';
+  if (type === 'discarded' || type === 'false_positive' || category === 'discarded' || category === 'false_positive') return 'discarded';
+  if (INFO_TYPES.has(type) || type === 'informational' || type === 'reconocimiento' || category === 'informational') return 'informational';
+  if (finding.isVulnerability === true && normalizeConfidence(finding.confidence) === 'high') return 'confirmed';
+  if (finding.isVulnerability === true) return 'possible';
+  return 'informational';
+}
+
+function getFinalStatus(finding = {}) {
+  const explicit = normalizeStatus(
+    finding.finalStatus ||
+    finding.final_status ||
+    finding.technicalStatus ||
+    finding.technical_status ||
+    finding.status ||
+    finding.estado,
+    ''
+  );
+
+  return explicit || inferStatusFromFinding(finding);
+}
+
+function getFinalSeverity(finding = {}) {
+  return normalizeSeverity(
+    finding.finalSeverity ||
+    finding.final_severity ||
+    finding.aiSuggestedSeverity ||
+    finding.ai_suggested_severity ||
+    finding.baseSeverity ||
+    finding.base_severity ||
+    finding.severity ||
+    finding.severidad ||
+    finding.criticidad ||
+    'info'
+  );
+}
+
+function normalizeSentence(value = '') {
+  return normalizeKey(value)
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function lowerFirst(value = '') {
+  const clean = String(value || '').trim();
+  return clean ? clean.charAt(0).toLowerCase() + clean.slice(1) : clean;
+}
+
+function mergeWithoutDuplication(base = '', extra = '') {
+  const baseText = String(base || '').trim();
+  const extraText = String(extra || '').trim();
+  if (!baseText) return extraText;
+  if (!extraText) return baseText;
+
+  const baseNormalized = normalizeSentence(baseText);
+  const extraNormalized = normalizeSentence(extraText);
+  if (!extraNormalized || baseNormalized.includes(extraNormalized)) return baseText;
+  if (!baseNormalized || extraNormalized.includes(baseNormalized)) return extraText;
+
+  const formattedExtra = /^(se\s+clasifica|la\s+criticidad|la\s+severidad|severidad|criticidad|porque|debido)/i.test(extraText)
+    ? extraText
+    : `Se clasifica con esta severidad porque ${lowerFirst(extraText)}`;
+
+  return `${baseText.replace(/[.。]\s*$/, '')}. ${formattedExtra}`;
+}
+
+function buildImpactText(finding = {}) {
+  const impactBase = finding.impact ||
+    finding.technicalImpact ||
+    finding.technical_impact ||
+    finding.businessImpact ||
+    finding.business_impact ||
+    '';
+  const severityExplanation = finding.severityReason ||
+    finding.severity_reason ||
+    finding.classificationReason ||
+    finding.classification_reason ||
+    finding.severityChangeReason ||
+    finding.severity_change_reason ||
+    finding.aiReasoningSummary ||
+    finding.ai_reasoning_summary ||
+    '';
+
+  return mergeWithoutDuplication(impactBase, severityExplanation) ||
+    'No disponible. Requiere revision tecnica segun el contexto del activo.';
 }
 
 function normalizeConfidence(value, fallback = 'low') {
@@ -114,7 +284,7 @@ function gfMaxSeverity(vulnerabilityType = '') {
 function isNucleiInformational(finding = {}) {
   const text = findingText(finding);
   return NUCLEI_INFO_TEMPLATES.some(token => text.includes(token)) ||
-    normalizeSeverity(finding.severity) === 'info';
+    getFinalSeverity(finding) === 'info';
 }
 
 function hasTechnicalEvidence(finding = {}) {
@@ -134,7 +304,7 @@ function hasTechnicalEvidence(finding = {}) {
 
 function sortFindings(findings = []) {
   return findings.slice().sort((a, b) => (
-    SEVERITY_RANK[normalizeSeverity(b.severity)] - SEVERITY_RANK[normalizeSeverity(a.severity)] ||
+    SEVERITY_RANK[getFinalSeverity(b)] - SEVERITY_RANK[getFinalSeverity(a)] ||
     canonicalToolName(a.tool).localeCompare(canonicalToolName(b.tool)) ||
     String(a.title || '').localeCompare(String(b.title || ''))
   ));
@@ -146,9 +316,17 @@ function makeBase(raw = {}) {
 
   return {
     ...raw,
+    _hasExplicitFinalSeverity: Boolean(raw.finalSeverity || raw.final_severity),
+    _hasExplicitAiSuggestedSeverity: Boolean(raw.aiSuggestedSeverity || raw.ai_suggested_severity || raw.suggestedSeverity || raw.suggested_severity),
+    _hasExplicitFinalStatus: Boolean(raw.finalStatus || raw.final_status || raw.technicalStatus || raw.technical_status || raw.status || raw.estado),
     tool,
     type,
-    severity: normalizeSeverity(raw.severity || raw.severidad || raw.criticidad),
+    baseSeverity: normalizeSeverity(raw.baseSeverity || raw.base_severity || raw.severity || raw.severidad || raw.criticidad),
+    aiSuggestedSeverity: normalizeSeverity(raw.aiSuggestedSeverity || raw.ai_suggested_severity || raw.suggestedSeverity || raw.suggested_severity || '', ''),
+    finalSeverity: getFinalSeverity(raw),
+    severity: getFinalSeverity(raw),
+    technicalStatus: normalizeStatus(raw.technicalStatus || raw.technical_status || raw.status || ''),
+    finalStatus: getFinalStatus(raw),
     confidence: normalizeConfidence(raw.confidence || raw.confianza, 'low'),
     category: raw.category || raw.categoria || 'informational',
     isVulnerability: raw.isVulnerability === true,
@@ -157,6 +335,76 @@ function makeBase(raw = {}) {
     requiresManualValidation: raw.requiresManualValidation === true,
     isFalsePositiveLikely: raw.isFalsePositiveLikely === true,
     falsePositiveReason: raw.falsePositiveReason || ''
+  };
+}
+
+function typeForStatus(status, finding = {}) {
+  const current = normalizeKey(finding.type);
+  if (current === 'false_positive') return 'false_positive';
+  if (status === 'confirmed') return 'confirmed_vulnerability';
+  if (status === 'possible') return 'possible_vulnerability';
+  if (status === 'candidate') return 'gf_candidate';
+  if (status === 'hardening') return 'hardening';
+  if (status === 'surface') return 'attack_surface';
+  if (status === 'discarded') return 'discarded';
+  return 'informational';
+}
+
+function categoryForStatus(status) {
+  return {
+    confirmed: 'vulnerability',
+    possible: 'vulnerability',
+    candidate: 'candidate',
+    hardening: 'hardening',
+    surface: 'attack_surface',
+    informational: 'informational',
+    discarded: 'discarded'
+  }[status] || 'informational';
+}
+
+function finalizeNormalizedFinding(finding = {}) {
+  const {
+    _hasExplicitFinalSeverity: hasExplicitFinalSeverity,
+    _hasExplicitAiSuggestedSeverity: hasExplicitAiSuggestedSeverity,
+    _hasExplicitFinalStatus: hasExplicitFinalStatus,
+    ...publicFinding
+  } = finding;
+  const baseSeverity = normalizeSeverity(finding.baseSeverity || finding.base_severity || finding.severity || finding.severidad || finding.criticidad);
+  const aiSuggestedRaw = hasExplicitAiSuggestedSeverity
+    ? (finding.aiSuggestedSeverity || finding.ai_suggested_severity || finding.suggestedSeverity || finding.suggested_severity)
+    : '';
+  const aiSuggestedSeverity = aiSuggestedRaw ? normalizeSeverity(aiSuggestedRaw) : '';
+  const finalSeverity = hasExplicitFinalSeverity
+    ? normalizeSeverity(finding.finalSeverity || finding.final_severity)
+    : (aiSuggestedSeverity || normalizeSeverity(finding.severity || baseSeverity));
+  const explicitStatus = hasExplicitFinalStatus
+    ? normalizeStatus(finding.finalStatus || finding.final_status || finding.technicalStatus || finding.technical_status || finding.status || finding.estado, '')
+    : '';
+  const finalStatus = explicitStatus || inferStatusFromFinding(finding);
+  const technicalStatus = (hasExplicitFinalStatus
+    ? normalizeStatus(finding.technicalStatus || finding.technical_status || finding.status || finding.estado, '')
+    : '') || finalStatus;
+  const isReportableVulnerability = ['confirmed', 'possible'].includes(finalStatus);
+  const statusType = typeForStatus(finalStatus, finding);
+
+  return {
+    ...publicFinding,
+    type: statusType,
+    category: categoryForStatus(finalStatus),
+    baseSeverity,
+    aiSuggestedSeverity: aiSuggestedSeverity || finding.aiSuggestedSeverity || '',
+    finalSeverity,
+    severity: finalSeverity,
+    technicalStatus,
+    finalStatus,
+    status: finalStatus,
+    confirmed: finalStatus === 'confirmed',
+    isVulnerability: isReportableVulnerability,
+    reportable: isReportableVulnerability,
+    requiresManualValidation: finalStatus === 'possible' || finalStatus === 'candidate' || finding.requiresManualValidation === true,
+    isFalsePositiveLikely: finalStatus === 'discarded' || finding.isFalsePositiveLikely === true,
+    impact: finding.impact || '',
+    recommendation: finding.recommendation || ''
   };
 }
 
@@ -353,7 +601,7 @@ function normalizeNuclei(finding) {
   };
 }
 
-function normalizeFindingClassification(raw = {}) {
+function normalizeFindingClassificationBase(raw = {}) {
   const finding = makeBase(raw);
   const tool = String(finding.tool || '').toLowerCase();
   const type = String(finding.type || '').toLowerCase();
@@ -393,7 +641,7 @@ function normalizeFindingClassification(raw = {}) {
     };
   }
 
-  if (HARDENING_TYPES.has(type) || (HARDENING_TOOLS.has(tool) && (finding.isVulnerability === true || normalizeSeverity(finding.severity) !== 'info'))) {
+  if (HARDENING_TYPES.has(type) || (HARDENING_TOOLS.has(tool) && (finding.isVulnerability === true || getFinalSeverity(finding) !== 'info'))) {
     return {
       ...finding,
       type: 'hardening',
@@ -423,7 +671,7 @@ function normalizeFindingClassification(raw = {}) {
     };
   }
 
-  if (INFO_TYPES.has(type) || normalizeSeverity(finding.severity) === 'info' || finding.isVulnerability !== true) {
+  if (INFO_TYPES.has(type) || getFinalSeverity(finding) === 'info' || finding.isVulnerability !== true) {
     return {
       ...finding,
       type: 'informational',
@@ -480,16 +728,36 @@ function normalizeFindingClassification(raw = {}) {
   };
 }
 
+function normalizeFindingClassification(raw = {}) {
+  return finalizeNormalizedFinding(normalizeFindingClassificationBase(raw));
+}
+
 function normalizeFindingsForReporting(findings = []) {
   return safeArray(findings).map(normalizeFindingClassification);
 }
 
 function severityDistribution(findings = []) {
   return safeArray(findings).reduce((acc, finding) => {
-    const severity = normalizeSeverity(finding.severity);
+    const severity = getFinalSeverity(finding);
     acc[severity] = (acc[severity] || 0) + 1;
     return acc;
   }, { critical: 0, high: 0, medium: 0, low: 0, info: 0 });
+}
+
+function statusDistribution(findings = []) {
+  return safeArray(findings).reduce((acc, finding) => {
+    const status = getFinalStatus(finding);
+    acc[status] = (acc[status] || 0) + 1;
+    return acc;
+  }, {
+    confirmed: 0,
+    possible: 0,
+    candidate: 0,
+    hardening: 0,
+    surface: 0,
+    informational: 0,
+    discarded: 0
+  });
 }
 
 function countByTool(findings = []) {
@@ -503,14 +771,14 @@ function countByTool(findings = []) {
 function buildFindingGroups(findings = []) {
   const normalized = normalizeFindingsForReporting(findings);
   const groups = {
-    confirmed: sortFindings(normalized.filter(f => f.type === 'confirmed_vulnerability')),
-    possible: sortFindings(normalized.filter(f => f.type === 'possible_vulnerability')),
-    gfCandidates: sortFindings(normalized.filter(f => f.type === 'gf_candidate')),
-    hardening: sortFindings(normalized.filter(f => f.type === 'hardening')),
-    attackSurface: sortFindings(normalized.filter(f => f.type === 'attack_surface')),
-    informational: sortFindings(normalized.filter(f => f.type === 'informational')),
-    discarded: sortFindings(normalized.filter(f => f.type === 'discarded')),
-    falsePositives: sortFindings(normalized.filter(f => f.type === 'false_positive'))
+    confirmed: sortFindings(normalized.filter(f => getFinalStatus(f) === 'confirmed')),
+    possible: sortFindings(normalized.filter(f => getFinalStatus(f) === 'possible')),
+    gfCandidates: sortFindings(normalized.filter(f => getFinalStatus(f) === 'candidate')),
+    hardening: sortFindings(normalized.filter(f => getFinalStatus(f) === 'hardening')),
+    attackSurface: sortFindings(normalized.filter(f => getFinalStatus(f) === 'surface')),
+    informational: sortFindings(normalized.filter(f => getFinalStatus(f) === 'informational')),
+    discarded: sortFindings(normalized.filter(f => getFinalStatus(f) === 'discarded')),
+    falsePositives: sortFindings(normalized.filter(f => f.type === 'false_positive' || f.isFalsePositiveLikely === true))
   };
 
   groups.reportable = [...groups.confirmed, ...groups.possible];
@@ -530,6 +798,50 @@ function buildFindingGroups(findings = []) {
   groups.baja_confianza = groups.falsePositives;
 
   return groups;
+}
+
+function logReconcile(logger, label, payload) {
+  const message = typeof payload === 'string' ? `${label} ${payload}` : label;
+  console.log(message, payload && typeof payload === 'object' ? payload : '');
+  if (logger?.variable) logger.variable(label.replace(/[\[\]\s-]+/g, '_').replace(/^_|_$/g, ''), payload || {});
+}
+
+function reconcileFindings(findings = [], options = {}) {
+  logReconcile(options.logger, '[RECONCILE-START]', { count: safeArray(findings).length });
+  const normalized = normalizeFindingsForReporting(findings);
+  const severityCounts = severityDistribution(normalized);
+  const statusCounts = statusDistribution(normalized);
+
+  normalized.forEach(finding => {
+    const legacySeverity = normalizeSeverity(finding.criticidad || finding.severidad || '', '');
+    if (legacySeverity && legacySeverity !== finding.finalSeverity) {
+      logReconcile(options.logger, '[RECONCILE-WARNING]', {
+        findingId: finding.id || finding.title || 'sin-id',
+        reason: 'legacy severity differs from finalSeverity',
+        legacySeverity,
+        finalSeverity: finding.finalSeverity
+      });
+    }
+  });
+
+  logReconcile(
+    options.logger,
+    '[RECONCILE-SEVERITY-COUNTS]',
+    `critical=${severityCounts.critical} high=${severityCounts.high} medium=${severityCounts.medium} low=${severityCounts.low} info=${severityCounts.info}`
+  );
+  logReconcile(
+    options.logger,
+    '[RECONCILE-STATUS-COUNTS]',
+    `confirmed=${statusCounts.confirmed} possible=${statusCounts.possible} candidate=${statusCounts.candidate} hardening=${statusCounts.hardening} surface=${statusCounts.surface} informational=${statusCounts.informational} discarded=${statusCounts.discarded}`
+  );
+  logReconcile(options.logger, '[RECONCILE-END]', { count: normalized.length });
+
+  return {
+    findings: normalized,
+    severityCounts,
+    statusCounts,
+    groups: buildFindingGroups(normalized)
+  };
 }
 
 function buildDashboardMetrics(findings = [], toolResults = {}) {
@@ -565,12 +877,18 @@ module.exports = {
   SEVERITY_ORDER,
   buildDashboardMetrics,
   buildFindingGroups,
+  buildImpactText,
   canonicalToolName,
+  getFinalSeverity,
+  getFinalStatus,
   normalizeFindingClassification,
   normalizeFindingsForReporting,
   normalizeSeverity,
+  normalizeStatus,
   percentage,
+  reconcileFindings,
   safeArray,
   severityDistribution,
+  statusDistribution,
   sortFindings
 };

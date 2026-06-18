@@ -54,7 +54,11 @@ const SEVERITY_MAP = {
 };
 
 function normalizarSeveridad(valor) {
-  return SEVERITY_MAP[String(valor || 'info').toLowerCase()] || 'info';
+  const key = String(valor || 'info')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  return SEVERITY_MAP[key] || 'info';
 }
 
 function normalizarConfianza(valor, fallback = 'low') {

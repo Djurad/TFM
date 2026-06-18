@@ -7,7 +7,10 @@ function limpiarTexto(valor, fallback = '') {
 }
 
 function normalizarSeveridad(valor) {
-  const lower = limpiarTexto(valor, 'info').toLowerCase();
+  const lower = limpiarTexto(valor, 'info')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
   const mapa = {
     critico: 'critical',
     critica: 'critical',

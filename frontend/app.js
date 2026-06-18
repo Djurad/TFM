@@ -8,6 +8,8 @@ const resultados = document.getElementById('resultados');
 let ultimoAnalisis = null;
 let filtroCategoria = 'todos';
 let filtroSeveridad = 'todos';
+let filtroBusqueda = '';
+let vistaCompacta = false;
 let progressEvents = [];
 let livePipeline = [];
 let pasosCompletados = new Set();
@@ -92,6 +94,124 @@ const severityLabels = {
   low: 'LOW',
   info: 'INFO'
 };
+
+function normalizeKey(value = '') {
+  return String(value || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[-\s]+/g, '_')
+    .trim();
+}
+
+function normalizeSeverity(value, fallback = 'info') {
+  if ((value === null || value === undefined || value === '') && fallback === '') return '';
+  const key = normalizeKey(value || fallback);
+  const map = {
+    critical: 'critical',
+    critica: 'critical',
+    critico: 'critical',
+    high: 'high',
+    alta: 'high',
+    alto: 'high',
+    medium: 'medium',
+    media: 'medium',
+    medio: 'medium',
+    low: 'low',
+    baja: 'low',
+    bajo: 'low',
+    info: 'info',
+    informational: 'info',
+    informativo: 'info',
+    informativa: 'info'
+  };
+  return map[key] || (['critical', 'high', 'medium', 'low', 'info'].includes(key) ? key : normalizeSeverity(fallback, 'info'));
+}
+
+function normalizeStatus(value, fallback = '') {
+  const key = normalizeKey(value || fallback);
+  const map = {
+    confirmed: 'confirmed',
+    confirmada: 'confirmed',
+    confirmado: 'confirmed',
+    verified: 'confirmed',
+    vulnerable: 'confirmed',
+    exploitable: 'confirmed',
+    confirmed_vulnerability: 'confirmed',
+    confirmed_sqli: 'confirmed',
+    possible: 'possible',
+    posible: 'possible',
+    suspicious: 'possible',
+    possible_sqli: 'possible',
+    possible_vulnerability: 'possible',
+    requires_manual_validation: 'possible',
+    candidate: 'candidate',
+    candidato: 'candidate',
+    gf: 'candidate',
+    gf_candidate: 'candidate',
+    hardening: 'hardening',
+    defensive_configuration: 'hardening',
+    configuracion: 'hardening',
+    surface: 'surface',
+    superficie: 'surface',
+    attack_surface: 'surface',
+    exposed_port: 'surface',
+    info: 'informational',
+    informational: 'informational',
+    informativo: 'informational',
+    reconocimiento: 'informational',
+    discarded: 'discarded',
+    descartado: 'discarded',
+    false_positive: 'discarded'
+  };
+  const normalized = map[key] || key;
+  return ['confirmed', 'possible', 'candidate', 'hardening', 'surface', 'informational', 'discarded'].includes(normalized)
+    ? normalized
+    : '';
+}
+
+function inferStatusFromFinding(finding = {}) {
+  const type = normalizeKey(finding.type);
+  const category = normalizeKey(finding.category);
+  const tool = normalizeKey(finding.tool);
+  if (type === 'confirmed_vulnerability') return 'confirmed';
+  if (type === 'possible_vulnerability') return 'possible';
+  if (type === 'gf_candidate' || category === 'candidate' || tool === 'gf') return 'candidate';
+  if (type === 'hardening' || category === 'hardening' || hardeningTypes.includes(finding.type)) return 'hardening';
+  if (type === 'attack_surface' || type === 'surface' || category === 'attack_surface') return 'surface';
+  if (type === 'discarded' || type === 'false_positive' || finding.isFalsePositiveLikely) return 'discarded';
+  if (type === 'informational' || type === 'reconocimiento' || !finding.isVulnerability) return 'informational';
+  if (finding.confidence === 'high') return 'confirmed';
+  if (finding.isVulnerability) return 'possible';
+  return 'informational';
+}
+
+function getFinalStatus(finding = {}) {
+  return normalizeStatus(
+    finding.finalStatus ||
+    finding.final_status ||
+    finding.technicalStatus ||
+    finding.technical_status ||
+    finding.status ||
+    '',
+    ''
+  ) || inferStatusFromFinding(finding);
+}
+
+function getFinalSeverity(finding = {}) {
+  return normalizeSeverity(
+    finding.finalSeverity ||
+    finding.final_severity ||
+    finding.aiSuggestedSeverity ||
+    finding.ai_suggested_severity ||
+    finding.baseSeverity ||
+    finding.base_severity ||
+    finding.severity ||
+    finding.severidad ||
+    finding.criticidad ||
+    'info'
+  );
+}
 
 function activarInteraccionVisual(scope = document) {
   const selector = '.panel, .terminal-card, .finding-card, .correlation-row';
@@ -312,6 +432,57 @@ function fallback(valor, texto = '-') {
   return valor;
 }
 
+function normalizeSentence(value = '') {
+  return normalizeKey(value)
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function lowerFirst(value = '') {
+  const clean = String(value || '').trim();
+  return clean ? clean.charAt(0).toLowerCase() + clean.slice(1) : clean;
+}
+
+function mergeWithoutDuplication(base = '', extra = '') {
+  const baseText = String(base || '').trim();
+  const extraText = String(extra || '').trim();
+  if (!baseText) return extraText;
+  if (!extraText) return baseText;
+
+  const baseNormalized = normalizeSentence(baseText);
+  const extraNormalized = normalizeSentence(extraText);
+  if (!extraNormalized || baseNormalized.includes(extraNormalized)) return baseText;
+  if (!baseNormalized || extraNormalized.includes(baseNormalized)) return extraText;
+
+  const formattedExtra = /^(se\s+clasifica|la\s+criticidad|la\s+severidad|severidad|criticidad|porque|debido)/i.test(extraText)
+    ? extraText
+    : `Se clasifica con esta severidad porque ${lowerFirst(extraText)}`;
+
+  return `${baseText.replace(/[.。]\s*$/, '')}. ${formattedExtra}`;
+}
+
+function buildImpactText(finding = {}) {
+  const impactBase = finding.impact ||
+    finding.technicalImpact ||
+    finding.technical_impact ||
+    finding.businessImpact ||
+    finding.business_impact ||
+    '';
+  const severityExplanation = finding.severityReason ||
+    finding.severity_reason ||
+    finding.classificationReason ||
+    finding.classification_reason ||
+    finding.severityChangeReason ||
+    finding.severity_change_reason ||
+    finding.aiReasoningSummary ||
+    finding.ai_reasoning_summary ||
+    '';
+
+  return mergeWithoutDuplication(impactBase, severityExplanation) ||
+    'No disponible. Requiere revision tecnica segun el contexto del activo.';
+}
+
 function normalizarEstadoPipeline(status = '') {
   const lower = String(status || '').trim().toLowerCase();
   if (['pending', 'pendiente', 'wait', 'waiting', '..', '--'].includes(lower)) return 'pending';
@@ -338,6 +509,7 @@ function statusCorto(status = '') {
 function normalizarGrupos(data = {}) {
   const findings = Array.isArray(data.findings) ? data.findings : [];
   const groups = data.groups || {};
+  const usarFindings = findings.length > 0;
   const pick = (...keys) => {
     for (const key of keys) {
       if (Array.isArray(groups[key])) return groups[key];
@@ -345,14 +517,14 @@ function normalizarGrupos(data = {}) {
     return null;
   };
 
-  const confirmed = pick('confirmed', 'confirmadas') || findings.filter(f => f.type === 'confirmed_vulnerability' || (f.isVulnerability && f.confidence === 'high' && !f.isFalsePositiveLikely && !hardeningTypes.includes(f.type) && !gfTypes.includes(f.type)));
-  const possible = pick('possible', 'posibles') || findings.filter(f => f.type === 'possible_vulnerability' || (f.isVulnerability && f.confidence === 'medium' && !f.isFalsePositiveLikely && !hardeningTypes.includes(f.type) && !gfTypes.includes(f.type)));
-  const gfCandidates = pick('gfCandidates', 'gf_candidates') || findings.filter(f => f.tool === 'gf' || gfTypes.includes(f.type));
-  const hardening = pick('hardening') || findings.filter(f => f.type === 'hardening' || hardeningTypes.includes(f.type) || f.category === 'hardening');
-  const attackSurface = pick('attackSurface', 'superficie', 'surface') || findings.filter(f => f.type === 'attack_surface' || f.type === 'surface' || f.category === 'attack_surface');
-  const informational = pick('informational', 'reconocimiento', 'recon') || findings.filter(f => f.type === 'informational' || f.type === 'reconocimiento' || (!f.isVulnerability && !gfCandidates.includes(f) && !attackSurface.includes(f) && !hardening.includes(f) && f.type !== 'discarded' && f.type !== 'false_positive'));
-  const discarded = pick('discarded', 'descartados') || findings.filter(f => f.type === 'discarded');
-  const falsePositives = pick('falsePositives', 'baja_confianza') || findings.filter(f => f.type === 'false_positive');
+  const confirmed = usarFindings ? findings.filter(f => getFinalStatus(f) === 'confirmed') : pick('confirmed', 'confirmadas') || [];
+  const possible = usarFindings ? findings.filter(f => getFinalStatus(f) === 'possible') : pick('possible', 'posibles') || [];
+  const gfCandidates = usarFindings ? findings.filter(f => getFinalStatus(f) === 'candidate') : pick('gfCandidates', 'gf_candidates') || [];
+  const hardening = usarFindings ? findings.filter(f => getFinalStatus(f) === 'hardening') : pick('hardening') || [];
+  const attackSurface = usarFindings ? findings.filter(f => getFinalStatus(f) === 'surface') : pick('attackSurface', 'superficie', 'surface') || [];
+  const informational = usarFindings ? findings.filter(f => getFinalStatus(f) === 'informational') : pick('informational', 'reconocimiento', 'recon') || [];
+  const discarded = usarFindings ? findings.filter(f => getFinalStatus(f) === 'discarded') : pick('discarded', 'descartados') || [];
+  const falsePositives = usarFindings ? findings.filter(f => f.type === 'false_positive' || f.isFalsePositiveLikely) : pick('falsePositives', 'baja_confianza') || [];
 
   return {
     confirmed,
@@ -415,18 +587,14 @@ function obtenerDetalleHerramienta(tool, result, counter = {}) {
 }
 
 function categoriaFinding(finding = {}) {
-  const type = String(finding.type || '').toLowerCase();
-  const category = String(finding.category || '').toLowerCase();
-  if (type === 'false_positive') return 'FALSO_POSITIVO';
-  if (type === 'discarded' || finding.isFalsePositiveLikely) return 'DESCARTADO';
-  if (gfTypes.includes(finding.type) || finding.tool === 'gf') return 'GF';
-  if (type === 'hardening' || category === 'hardening' || hardeningTypes.includes(finding.type)) return 'HARDENING';
-  if (type === 'attack_surface' || type === 'surface' || category === 'attack_surface') return 'SUPERFICIE';
-  if (type === 'confirmed_vulnerability') return 'EXPLOTABLE';
-  if (type === 'possible_vulnerability') return 'POSIBLE';
-  if (!finding.isVulnerability || type === 'reconocimiento' || type === 'informational') return 'INFO';
-  if (finding.confidence !== 'high') return 'POSIBLE';
-  return 'EXPLOTABLE';
+  const status = getFinalStatus(finding);
+  if (status === 'confirmed') return 'EXPLOTABLE';
+  if (status === 'possible') return 'POSIBLE';
+  if (status === 'candidate') return 'GF';
+  if (status === 'hardening') return 'HARDENING';
+  if (status === 'surface') return 'SUPERFICIE';
+  if (status === 'discarded') return normalizeKey(finding.type) === 'false_positive' ? 'FALSO_POSITIVO' : 'DESCARTADO';
+  return 'INFO';
 }
 
 function buildAiReason(finding = {}) {
@@ -474,12 +642,12 @@ function prioridadCategoria(categoria) {
 }
 
 function prioridadSeveridad(severity = 'info') {
-  return { critical: 0, high: 1, medium: 2, low: 3, info: 4 }[String(severity).toLowerCase()] ?? 5;
+  return { critical: 0, high: 1, medium: 2, low: 3, info: 4 }[normalizeSeverity(severity)] ?? 5;
 }
 
 function prioridadHallazgo(finding = {}) {
   const categoria = categoriaFinding(finding);
-  const severity = String(finding.severity || 'info').toLowerCase();
+  const severity = getFinalSeverity(finding);
   if (categoria === 'EXPLOTABLE' && ['critical', 'high'].includes(severity)) return 0;
   if (categoria === 'POSIBLE' && severity === 'high') return 1;
   if (['EXPLOTABLE', 'POSIBLE'].includes(categoria) && severity === 'medium') return 2;
@@ -527,7 +695,7 @@ function sortFindingsByPriority(findings = []) {
     const catA = categoriaFinding(a);
     const catB = categoriaFinding(b);
     return prioridadHallazgo(a) - prioridadHallazgo(b) ||
-      prioridadSeveridad(a.severity) - prioridadSeveridad(b.severity) ||
+      prioridadSeveridad(getFinalSeverity(a)) - prioridadSeveridad(getFinalSeverity(b)) ||
       prioridadCategoria(catA) - prioridadCategoria(catB) ||
       String(a.tool || '').localeCompare(String(b.tool || ''));
   });
@@ -536,27 +704,67 @@ function sortFindingsByPriority(findings = []) {
 function aplicarFiltros(findings = []) {
   return findings.filter(finding => {
     const categoria = categoriaFinding(finding).toLowerCase();
-    const severity = String(finding.severity || 'info').toLowerCase();
+    const severity = getFinalSeverity(finding);
     const catOk = filtroCategoria === 'todos' ||
       (filtroCategoria === 'explotables' && categoria === 'explotable') ||
       (filtroCategoria === 'posibles' && categoria === 'posible') ||
       filtroCategoria === categoria;
-    const sevOk = filtroSeveridad === 'todos' ||
-      filtroSeveridad === severity ||
-      (filtroSeveridad === 'high' && severity === 'critical');
-    return catOk && sevOk;
+    const sevOk = filtroSeveridad === 'todos' || filtroSeveridad === severity;
+    const texto = textoFinding(finding);
+    const searchOk = !filtroBusqueda ||
+      texto.includes(filtroBusqueda) ||
+      String(finding.affected_url || finding.affected_asset || '').toLowerCase().includes(filtroBusqueda);
+
+    return catOk && sevOk && searchOk;
   });
 }
 
-function renderFiltros() {
-  const cats = ['todos', 'explotables', 'posibles', 'gf', 'hardening', 'superficie', 'info', 'descartado'];
-  const sevs = ['todos', 'high', 'medium', 'low', 'info'];
+function contarSeveridades(findings = []) {
+  return findings.reduce((acc, finding) => {
+    const key = getFinalSeverity(finding);
+    acc[key] = (acc[key] || 0) + 1;
+    acc.total += 1;
+    return acc;
+  }, { total: 0, critical: 0, high: 0, medium: 0, low: 0, info: 0 });
+}
+
+function renderFiltros(findings = [], filtrados = []) {
+  const filtrosSeveridad = [
+    ['todos', 'Todas'],
+    ['critical', 'Criticas'],
+    ['high', 'Altas'],
+    ['medium', 'Medias'],
+    ['low', 'Bajas'],
+    ['info', 'Info']
+  ];
+  const counts = contarSeveridades(filtrados);
+
   return `
-    <div class="filter-row" data-filter-group="categoria">
-      ${cats.map(cat => `<button type="button" class="filter-btn ${filtroCategoria === cat ? 'active' : ''}" data-filter-type="categoria" data-filter-value="${cat}">[ ${cat.toUpperCase()} ]</button>`).join('')}
-    </div>
-    <div class="filter-row" data-filter-group="severidad">
-      ${sevs.map(sev => `<button type="button" class="filter-btn ${filtroSeveridad === sev ? 'active' : ''}" data-filter-type="severidad" data-filter-value="${sev}">[ ${sev.toUpperCase()} ]</button>`).join('')}
+    <div class="findings-toolbar">
+      <div class="filter-row severity-filter" data-filter-group="severidad">
+        ${filtrosSeveridad.map(([value, label]) => `<button type="button" class="filter-btn ${filtroSeveridad === value ? 'active' : ''}" data-filter-type="severidad" data-filter-value="${value}">${label}</button>`).join('')}
+      </div>
+
+      <div class="finding-toolbar-controls">
+        <label class="finding-search">
+          <i class="fas fa-magnifying-glass"></i>
+          <input id="findingSearch" type="search" value="${escaparHtml(filtroBusqueda)}" placeholder="Buscar por titulo, impacto o URL..." autocomplete="off">
+        </label>
+        <div class="view-toggle" role="group" aria-label="Modo de vista">
+          <button type="button" class="view-btn ${!vistaCompacta ? 'active' : ''}" data-view-mode="detailed">Detallada</button>
+          <button type="button" class="view-btn ${vistaCompacta ? 'active' : ''}" data-view-mode="compact">Compacta</button>
+        </div>
+        <button type="button" class="export-visible-csv"><i class="fas fa-file-csv"></i> Exportar CSV</button>
+      </div>
+
+      <div class="finding-stats-line">
+        <strong>${escaparHtml(filtrados.length)}</strong> de ${escaparHtml(findings.length)} hallazgos visibles
+        <span class="stat-critical">Critica: ${escaparHtml(counts.critical)}</span>
+        <span class="stat-high">Alta: ${escaparHtml(counts.high)}</span>
+        <span class="stat-medium">Media: ${escaparHtml(counts.medium)}</span>
+        <span class="stat-low">Baja: ${escaparHtml(counts.low)}</span>
+        <span class="stat-info">Info: ${escaparHtml(counts.info)}</span>
+      </div>
     </div>
   `;
 }
@@ -568,37 +776,27 @@ function textoFinding(finding = {}) {
     finding.evidence,
     finding.type,
     finding.tool,
-    finding.impact
+    buildImpactText(finding)
   ].filter(Boolean).join(' ').toLowerCase();
 }
 
 function nivelVisualFinding(finding = {}) {
-  const severity = String(finding.severity || '').toLowerCase();
-  const categoria = categoriaFinding(finding);
-  const texto = textoFinding(finding);
-
-  if (categoria === 'GF') {
-    if (severity === 'medium') return { key: 'medium', label: 'MEDIA', icon: 'fa-crosshairs' };
-    return { key: 'low', label: 'BAJA', icon: 'fa-crosshairs' };
-  }
-  if (categoria === 'POSIBLE') {
-    if (severity === 'high' || severity === 'critical') return { key: 'high', label: 'ALTA', icon: 'fa-bug' };
-    if (severity === 'medium') return { key: 'medium', label: 'MEDIA', icon: 'fa-bug' };
-    return { key: 'low', label: 'BAJA', icon: 'fa-bug' };
-  }
-  if (['critical'].includes(severity) || (finding.confidence === 'high' && categoria === 'EXPLOTABLE') || (categoria === 'EXPLOTABLE' && /\b(rce|sql injection|sqlmap|xss|dalfox|nuclei|secret|credential|trufflehog)\b/.test(texto))) {
-    return { key: 'critical', label: 'CRITICA', icon: 'fa-triangle-exclamation' };
-  }
-  if (['high'].includes(severity) || categoria === 'POSIBLE' || /\b(posible|explotable|redirect|ssrf|sqli)\b/.test(texto)) {
-    return { key: 'high', label: 'ALTA', icon: 'fa-bug' };
-  }
-  if (['medium'].includes(severity) || categoria === 'GF' || /\b(gf|candidate|candidato)\b/.test(texto)) {
-    return { key: 'medium', label: 'MEDIA', icon: 'fa-eye' };
-  }
-  if (['low'].includes(severity) || ['SUPERFICIE', 'HARDENING'].includes(categoria) || /\b(missing header|header|cookie|tls|https|robots|sitemap|surface|hardening)\b/.test(texto)) {
-    return { key: 'low', label: 'BAJA', icon: 'fa-shield-halved' };
-  }
-  return { key: 'info', label: 'INFO', icon: 'fa-circle-info' };
+  const severity = getFinalSeverity(finding);
+  const icons = {
+    critical: 'fa-triangle-exclamation',
+    high: 'fa-bug',
+    medium: 'fa-eye',
+    low: 'fa-shield-halved',
+    info: 'fa-circle-info'
+  };
+  const labels = {
+    critical: 'CRITICA',
+    high: 'ALTA',
+    medium: 'MEDIA',
+    low: 'BAJA',
+    info: 'INFO'
+  };
+  return { key: severity, label: labels[severity] || 'INFO', icon: icons[severity] || 'fa-circle-info' };
 }
 
 function grupoVisualFinding(finding = {}) {
@@ -613,7 +811,7 @@ function grupoVisualFinding(finding = {}) {
 }
 
 function descripcionCorta(finding = {}) {
-  return fallback(finding.impact || finding.description || buildAiReason(finding), 'Sin impacto disponible.');
+  return fallback(buildImpactText(finding) || finding.description || buildAiReason(finding), 'Sin impacto disponible.');
 }
 
 function evidenciaFinding(finding = {}) {
@@ -634,28 +832,27 @@ function renderFindingCard(finding = {}) {
   const nivel = nivelVisualFinding(finding);
   const categoria = categoriaFinding(finding);
   return `
-    <article class="finding-card finding-${escaparHtml(nivel.key)}">
+    <article class="finding-card finding-${escaparHtml(nivel.key)} ${vistaCompacta ? 'compact' : ''}">
       <header>
         <span class="finding-severity"><i class="fas ${escaparHtml(nivel.icon)}"></i> ${escaparHtml(nivel.label)}</span>
         <span class="terminal-badge">[${escaparHtml(fallback(finding.tool, 'tool'))}]</span>
       </header>
       <h3>${escaparHtml(fallback(finding.title, 'Hallazgo sin titulo'))}</h3>
-      <p>${escaparHtml(descripcionCorta(finding))}</p>
+      ${vistaCompacta ? '' : `<p>${escaparHtml(descripcionCorta(finding))}</p>`}
       <div class="finding-meta">
         <span><i class="fas fa-layer-group"></i> ${escaparHtml(categoria)}</span>
         <span><i class="fas fa-crosshairs"></i> ${escaparHtml(fallback(finding.affected_url || finding.affected_asset || ultimoAnalisis?.target, '-'))}</span>
         ${finding.severityChangedByAI
-          ? `<span><i class="fas fa-wand-magic-sparkles"></i> IA: ${escaparHtml(finding.baseSeverity || 'base')} -> ${escaparHtml(finding.finalSeverity || finding.severity || 'final')}</span>`
+          ? `<span><i class="fas fa-wand-magic-sparkles"></i> IA: ${escaparHtml(finding.baseSeverity || 'base')} -> ${escaparHtml(getFinalSeverity(finding))}</span>`
           : ''}
       </div>
-      <div class="finding-analysis">
-        ${renderFindingDetail('Impacto', 'fa-bolt', finding.impact, 'No disponible. Requiere revision tecnica segun el contexto del activo.')}
-        ${renderFindingDetail('Solucion recomendada', 'fa-screwdriver-wrench', finding.recommendation, 'No disponible. Validar el hallazgo y aplicar la remediacion correspondiente.')}
-        ${finding.severityReason || finding.severity_reason || finding.aiReasoningSummary
-          ? renderFindingDetail('Criterio de criticidad', 'fa-scale-balanced', finding.severityReason || finding.severity_reason || finding.aiReasoningSummary, '')
-          : ''}
-      </div>
-      ${evidenciaFinding(finding) ? `<pre class="finding-evidence">${escaparHtml(evidenciaFinding(finding))}</pre>` : ''}
+      ${vistaCompacta ? '' : `
+        <div class="finding-analysis">
+          ${renderFindingDetail('Impacto', 'fa-bolt', buildImpactText(finding), 'No disponible. Requiere revision tecnica segun el contexto del activo.')}
+          ${renderFindingDetail('Solucion recomendada', 'fa-screwdriver-wrench', finding.recommendation, 'No disponible. Validar el hallazgo y aplicar la remediacion correspondiente.')}
+        </div>
+        ${evidenciaFinding(finding) ? `<pre class="finding-evidence">${escaparHtml(evidenciaFinding(finding))}</pre>` : ''}
+      `}
     </article>
   `;
 }
@@ -683,7 +880,8 @@ function renderNotaGf() {
 }
 
 function renderListaPriorizada(findings = []) {
-  const filtrados = aplicarFiltros(deduplicarFindingsPriorizados(findings));
+  const deduplicados = deduplicarFindingsPriorizados(findings);
+  const filtrados = aplicarFiltros(deduplicados);
   const grupos = {
     confirmadas: [],
     posibles: [],
@@ -704,7 +902,7 @@ function renderListaPriorizada(findings = []) {
         <h2>HALLAZGOS OBTENIDOS</h2>
         <span>${escaparHtml(filtrados.length)}</span>
       </div>
-      ${renderFiltros()}
+      ${renderFiltros(deduplicados, filtrados)}
       <div class="finding-groups">
         ${renderGrupoHallazgos('Vulnerabilidades confirmadas', 'fa-triangle-exclamation', grupos.confirmadas, true)}
         ${renderGrupoHallazgos('Posibles vulnerabilidades', 'fa-bug', grupos.posibles, true)}
@@ -717,6 +915,47 @@ function renderListaPriorizada(findings = []) {
       </div>
     </section>
   `;
+}
+
+function csvEscape(value) {
+  return `"${String(value ?? '').replace(/"/g, '""')}"`;
+}
+
+function exportarFindingsVisiblesCSV() {
+  if (!ultimoAnalisis) return;
+
+  const grupos = normalizarGrupos(ultimoAnalisis);
+  const allFindings = [
+    ...grupos.confirmadas,
+    ...grupos.posibles,
+    ...grupos.gfCandidates,
+    ...grupos.hardening,
+    ...grupos.superficie,
+    ...(grupos.reconocimiento || []),
+    ...grupos.baja_confianza,
+    ...grupos.descartados
+  ];
+  const visibles = aplicarFiltros(deduplicarFindingsPriorizados(allFindings));
+  const rows = [
+    ['Severidad', 'Titulo', 'URL', 'Impacto', 'Solucion'],
+    ...visibles.map(finding => [
+      getFinalSeverity(finding),
+      finding.title || '',
+      finding.affected_url || finding.affected_asset || '',
+      buildImpactText(finding) || finding.description || '',
+      finding.recommendation || ''
+    ])
+  ];
+  const csv = rows.map(row => row.map(csvEscape).join(',')).join('\r\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'hallazgos-visibles.csv';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 function barraAsciiRiesgo(score) {
@@ -763,7 +1002,7 @@ function buildSeverityCounts(grupos = {}) {
     ...(grupos.reconocimiento || []),
     ...(grupos.descartados || [])
   ].forEach(finding => {
-    const severity = String(finding.severity || 'info').toLowerCase();
+    const severity = getFinalSeverity(finding);
     if (counts[severity] !== undefined) counts[severity] += 1;
   });
   return counts;
@@ -1364,6 +1603,29 @@ function renderFindings(findings = [], groups = null) {
       renderFindings(data.findings || [], data.groups || null);
     });
   });
+
+  const searchInput = resultados.querySelector('#findingSearch');
+  if (searchInput) {
+    searchInput.addEventListener('input', event => {
+      filtroBusqueda = String(event.target.value || '').trim().toLowerCase();
+      renderFindings(data.findings || [], data.groups || null);
+      const nextSearch = resultados.querySelector('#findingSearch');
+      if (nextSearch) {
+        nextSearch.focus();
+        nextSearch.setSelectionRange(nextSearch.value.length, nextSearch.value.length);
+      }
+    });
+  }
+
+  resultados.querySelectorAll('.view-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      vistaCompacta = btn.dataset.viewMode === 'compact';
+      renderFindings(data.findings || [], data.groups || null);
+    });
+  });
+
+  const exportBtn = resultados.querySelector('.export-visible-csv');
+  if (exportBtn) exportBtn.addEventListener('click', exportarFindingsVisiblesCSV);
 }
 
 btnAnalizar.addEventListener('click', async () => {
@@ -1377,6 +1639,8 @@ btnAnalizar.addEventListener('click', async () => {
   ultimoAnalisis = null;
   filtroCategoria = 'todos';
   filtroSeveridad = 'todos';
+  filtroBusqueda = '';
+  vistaCompacta = false;
   progressEvents = [];
   livePipeline = crearPipelineInicial();
   pasosCompletados = new Set();
@@ -1480,6 +1744,8 @@ if (btnNuevoAnalisis) {
     ultimoAnalisis = null;
     filtroCategoria = 'todos';
     filtroSeveridad = 'todos';
+    filtroBusqueda = '';
+    vistaCompacta = false;
     progressEvents = [];
     livePipeline = [];
     pasosCompletados = new Set();

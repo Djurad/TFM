@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { COLORS, SEVERITY, FONTS, PAGE } = require('./pdfStyles');
 const { drawDonutChart, drawHorizontalChart, drawRiskGauge, drawSeverityBars } = require('./pdfCharts');
-const { getAsset, normalizeSeverity, safeArray, text, truncate } = require('./pdfUtils');
+const { buildImpactText, getAsset, getFinalSeverity, normalizeSeverity, safeArray, text, truncate } = require('./pdfUtils');
 
 function getLogoPath() {
   const logoPath = path.join(__dirname, '../../../frontend/assets/site-logo.png');
@@ -284,8 +284,9 @@ function drawFindingsSummaryTable(doc, report) {
     doc.rect(left, y, PAGE.contentWidth, 30).fill(COLORS.panelAlt);
     doc.moveTo(left, y + 30).lineTo(left + PAGE.contentWidth, y + 30).strokeColor(COLORS.borderSoft).lineWidth(0.5).stroke();
     const state = report.groups.confirmed.includes(finding) ? 'Confirmada' : 'Posible';
+    const finalSeverity = getFinalSeverity(finding);
     const values = [
-      severityLabel(finding.severity),
+      severityLabel(finalSeverity),
       truncate(finding.title, 58),
       text(finding.tool, '-'),
       truncate(getAsset(finding), 64),
@@ -294,7 +295,7 @@ function drawFindingsSummaryTable(doc, report) {
     ];
     let x = left;
     values.forEach((value, index) => {
-      const color = index === 0 ? severityColor(finding.severity) : COLORS.text;
+      const color = index === 0 ? severityColor(finalSeverity) : COLORS.text;
       doc.font(index === 0 ? FONTS.bold : FONTS.regular).fontSize(7.2).fillColor(color);
       fixedText(doc, value, x + 6, y + 9, { width: widths[index] - 10, height: 9 });
       x += widths[index];
@@ -330,18 +331,15 @@ function findingHeight(doc, finding) {
   const assetHeight = doc.font(FONTS.regular).fontSize(8).heightOfString(text(getAsset(finding)), { width: PAGE.contentWidth - 32 });
   const evidenceHeight = doc.font(FONTS.mono).fontSize(7).heightOfString(text(finding.evidence || finding.raw_reference, 'Sin evidencia detallada disponible.'), { width: PAGE.contentWidth - 32, lineGap: 1 });
   const colW = (PAGE.contentWidth - 46) / 2;
-  const impactHeight = doc.font(FONTS.regular).fontSize(7.5).heightOfString(text(finding.impact, 'No disponible'), { width: colW });
+  const impactHeight = doc.font(FONTS.regular).fontSize(7.5).heightOfString(text(buildImpactText(finding), 'No disponible'), { width: colW });
   const recHeight = doc.font(FONTS.regular).fontSize(7.5).heightOfString(text(finding.recommendation, 'No disponible'), { width: colW });
-  const reasonHeight = finding.severityReason
-    ? doc.font(FONTS.regular).fontSize(7.2).heightOfString(text(finding.severityReason), { width: PAGE.contentWidth - 32, lineGap: 1 })
-    : 0;
   const correlationHeight = safeArray(finding.correlation_notes).length
     ? doc.font(FONTS.regular).fontSize(7).heightOfString(`Correlacion: ${truncate(finding.correlation_notes.join(' | '), 160)}`, { width: PAGE.contentWidth - 32 })
     : 0;
 
   return Math.max(
     170,
-    30 + titleHeight + 34 + 34 + assetHeight + 28 + Math.max(evidenceHeight, 20) + 30 + Math.max(impactHeight, recHeight, 20) + reasonHeight + correlationHeight + 42
+    30 + titleHeight + 34 + 34 + assetHeight + 28 + Math.max(evidenceHeight, 20) + 30 + Math.max(impactHeight, recHeight, 20) + correlationHeight + 42
   );
 }
 
@@ -350,7 +348,7 @@ function drawFindingCard(doc, finding, state) {
   const height = findingHeight(doc, finding);
   ensureSpace(doc, height + 14);
   const y = doc.y;
-  const sev = normalizeSeverity(finding.severity);
+  const sev = getFinalSeverity(finding);
 
   panel(doc, left, y, PAGE.contentWidth, height, { fill: COLORS.panel, accent: severityColor(sev) });
   chip(doc, left + 16, y + 14, severityLabel(sev).toUpperCase(), severityColor(sev));
@@ -383,23 +381,13 @@ function drawFindingCard(doc, finding, state) {
   const bottomY = evidenceBottom + 18;
   const colW = (PAGE.contentWidth - 46) / 2;
   doc.font(FONTS.bold).fontSize(7).fillColor(COLORS.subtle).text('IMPACTO', left + 16, bottomY);
-  doc.font(FONTS.regular).fontSize(7.5).fillColor(COLORS.text).text(text(finding.impact, 'No disponible'), left + 16, bottomY + 11, { width: colW });
+  doc.font(FONTS.regular).fontSize(7.5).fillColor(COLORS.text).text(text(buildImpactText(finding), 'No disponible'), left + 16, bottomY + 11, { width: colW });
   const impactBottom = doc.y;
   doc.font(FONTS.bold).fontSize(7).fillColor(COLORS.subtle).text('SOLUCION RECOMENDADA', left + 28 + colW, bottomY);
   doc.font(FONTS.regular).fontSize(7.5).fillColor(COLORS.text).text(text(finding.recommendation, 'No disponible'), left + 28 + colW, bottomY + 11, { width: colW });
   const recommendationBottom = doc.y;
 
   let extraBottom = Math.max(impactBottom, recommendationBottom);
-  if (finding.severityReason) {
-    const reasonY = extraBottom + 12;
-    doc.font(FONTS.bold).fontSize(7).fillColor(COLORS.subtle).text('CRITERIO DE CRITICIDAD', left + 16, reasonY);
-    doc.font(FONTS.regular).fontSize(7.2).fillColor(COLORS.muted).text(text(finding.severityReason), left + 16, reasonY + 11, {
-      width: PAGE.contentWidth - 32,
-      lineGap: 1
-    });
-    extraBottom = doc.y;
-  }
-
   if (safeArray(finding.correlation_notes).length) {
     const correlationY = extraBottom + 12;
     doc.font(FONTS.regular).fontSize(7).fillColor(COLORS.low)
@@ -473,16 +461,17 @@ function drawSurface(doc, report) {
     const y = doc.y;
     doc.rect(left, y, PAGE.contentWidth, 28).fill(COLORS.panelAlt);
     doc.moveTo(left, y + 28).lineTo(left + PAGE.contentWidth, y + 28).strokeColor(COLORS.borderSoft).lineWidth(0.5).stroke();
+    const finalSeverity = getFinalSeverity(finding);
     const values = [
       text(finding.tool, '-'),
       truncate(finding.title, 44),
       truncate(getAsset(finding), 106),
-      severityLabel(finding.severity)
+      severityLabel(finalSeverity)
     ];
     let x = left;
     values.forEach((value, index) => {
       doc.font(index === 3 ? FONTS.bold : FONTS.regular).fontSize(7.2)
-        .fillColor(index === 3 ? severityColor(finding.severity) : COLORS.text);
+        .fillColor(index === 3 ? severityColor(finalSeverity) : COLORS.text);
       fixedText(doc, value, x + 6, y + 8, { width: widths[index] - 10, height: 9 });
       x += widths[index];
     });

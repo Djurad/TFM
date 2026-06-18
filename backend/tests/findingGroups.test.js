@@ -1,7 +1,12 @@
 const assert = require('assert');
 const { calcularRiskScore } = require('../modules/priorizacion/scoring');
 const {
+  buildImpactText,
   buildFindingGroups,
+  getFinalSeverity,
+  normalizeSeverity,
+  normalizeStatus,
+  reconcileFindings,
   normalizeFindingClassification
 } = require('../modules/priorizacion/findingGroups');
 
@@ -68,10 +73,68 @@ function testNucleiTechDetect() {
   assert.strictEqual(groups.informational.length, 2);
 }
 
+function testSeverityNormalizationAndPriority() {
+  assert.strictEqual(normalizeSeverity('alta'), 'high');
+  assert.strictEqual(normalizeSeverity('high'), 'high');
+  assert.strictEqual(normalizeSeverity('crítica'), 'critical');
+  assert.strictEqual(normalizeSeverity('critica'), 'critical');
+  assert.strictEqual(normalizeSeverity('media'), 'medium');
+  assert.strictEqual(normalizeSeverity('baja'), 'low');
+
+  assert.strictEqual(getFinalSeverity({ criticidad: 'crítica', finalSeverity: 'high' }), 'high');
+  assert.strictEqual(getFinalSeverity({ severity: 'critical', finalSeverity: 'medium' }), 'medium');
+  assert.strictEqual(getFinalSeverity({ baseSeverity: 'high', aiSuggestedSeverity: 'medium', finalSeverity: 'medium' }), 'medium');
+}
+
+function testStatusNormalization() {
+  assert.strictEqual(normalizeStatus('confirmada'), 'confirmed');
+  assert.strictEqual(normalizeStatus('possible_sqli'), 'possible');
+  assert.strictEqual(normalizeStatus('gf'), 'candidate');
+  assert.strictEqual(normalizeStatus('hardening'), 'hardening');
+  assert.strictEqual(normalizeStatus('surface'), 'surface');
+}
+
+function testCountersFromFinalFields() {
+  const reconciled = reconcileFindings([
+    { tool: 'dalfox', title: 'XSS', finalSeverity: 'high', finalStatus: 'confirmed', confidence: 'high', isVulnerability: true },
+    { tool: 'sqlmap', title: 'SQLi posible', finalSeverity: 'medium', finalStatus: 'possible', confidence: 'medium', isVulnerability: true },
+    { tool: 'headers', title: 'CSP ausente', finalSeverity: 'medium', finalStatus: 'hardening' },
+    { tool: 'ports', title: '443 abierto', finalSeverity: 'info', finalStatus: 'surface' }
+  ]);
+
+  assert.deepStrictEqual(reconciled.severityCounts, {
+    critical: 0,
+    high: 1,
+    medium: 2,
+    low: 0,
+    info: 1
+  });
+  assert.strictEqual(reconciled.statusCounts.confirmed, 1);
+  assert.strictEqual(reconciled.statusCounts.possible, 1);
+  assert.strictEqual(reconciled.statusCounts.hardening, 1);
+  assert.strictEqual(reconciled.statusCounts.surface, 1);
+}
+
+function testBuildImpactText() {
+  const impact = buildImpactText({
+    impact: 'Permite ejecutar JavaScript en el navegador.',
+    severityReason: 'Se clasifica como alta porque está confirmada por Dalfox.'
+  });
+
+  assert.strictEqual(
+    impact,
+    'Permite ejecutar JavaScript en el navegador. Se clasifica como alta porque está confirmada por Dalfox.'
+  );
+}
+
 testOnlyGfCandidates();
 testSqlmapPossible();
 testSqlmapConfirmed();
 testOnlyHardening();
 testNucleiTechDetect();
+testSeverityNormalizationAndPriority();
+testStatusNormalization();
+testCountersFromFinalFields();
+testBuildImpactText();
 
 console.log('findingGroups tests passed');

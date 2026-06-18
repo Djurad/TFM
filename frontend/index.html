@@ -1081,6 +1081,101 @@
       border-top: 1px solid var(--border);
     }
 
+    .findings-toolbar {
+      display: grid;
+      gap: 12px;
+      margin-bottom: 16px;
+      padding: 14px;
+      border: 1px solid rgba(0, 255, 209, 0.14);
+      border-radius: 16px;
+      background: rgba(10, 14, 23, 0.58);
+    }
+    .filter-row.severity-filter {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .filter-btn,
+    .view-btn,
+    .export-visible-csv {
+      min-height: 36px;
+      padding: 8px 15px;
+      border-radius: 999px;
+      border-color: rgba(0, 255, 209, 0.36);
+      background: rgba(15, 19, 28, 0.72);
+      color: var(--text-secondary);
+      text-transform: none;
+      letter-spacing: 0;
+    }
+    .filter-btn.active,
+    .view-btn.active {
+      color: #06131A;
+      background: var(--accent-cyan);
+      border-color: var(--accent-cyan);
+      box-shadow: 0 0 14px rgba(0, 255, 209, 0.26);
+    }
+    .finding-toolbar-controls {
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) auto auto;
+      gap: 10px;
+      align-items: center;
+    }
+    .finding-search {
+      position: relative;
+      margin: 0;
+      display: block;
+    }
+    .finding-search i {
+      position: absolute;
+      left: 14px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: var(--text-secondary);
+      z-index: 1;
+    }
+    .finding-search input {
+      padding-left: 40px;
+      min-height: 40px;
+      border-radius: 13px;
+      text-transform: none;
+    }
+    .view-toggle {
+      display: inline-flex;
+      padding: 4px;
+      gap: 4px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: rgba(15, 19, 28, 0.82);
+    }
+    .view-toggle .view-btn {
+      min-height: 30px;
+      padding: 6px 12px;
+      border-color: transparent;
+      background: transparent;
+    }
+    .export-visible-csv {
+      color: var(--accent-cyan);
+      border-color: rgba(0, 255, 209, 0.46);
+    }
+    .finding-stats-line {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      justify-content: flex-end;
+      color: var(--text-secondary);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.72rem;
+    }
+    .finding-stats-line strong {
+      color: var(--text-primary);
+    }
+    .stat-critical { color: var(--accent-red); }
+    .stat-high { color: #FF6B00; }
+    .stat-medium { color: var(--accent-amber); }
+    .stat-low { color: var(--green-neon); }
+    .stat-info { color: #7DD3FC; }
+
     .finding-groups {
       display: grid;
       gap: 12px;
@@ -1145,6 +1240,19 @@
       border-color: rgba(0, 255, 209, 0.48);
       box-shadow: 0 0 0 1px rgba(0, 255, 209, 0.1), 0 14px 28px rgba(0, 0, 0, 0.2);
       --lift: -2px;
+    }
+    .finding-card.compact {
+      padding: 10px 12px;
+      gap: 6px;
+      font-size: 0.9rem;
+    }
+    .finding-card.compact h3 {
+      font-size: 0.84rem;
+    }
+    .finding-card.compact .finding-meta,
+    .finding-card.compact .terminal-badge,
+    .finding-card.compact .finding-severity {
+      font-size: 0.6rem;
     }
     .finding-card header,
     .finding-meta {
@@ -1413,6 +1521,20 @@
       }
       .buttons {
         flex-wrap: wrap;
+      }
+      .finding-toolbar-controls {
+        grid-template-columns: 1fr;
+      }
+      .finding-stats-line {
+        justify-content: flex-start;
+      }
+      .view-toggle,
+      .export-visible-csv {
+        width: 100%;
+      }
+      .view-toggle .view-btn {
+        flex: 1;
+        justify-content: center;
       }
     }
   </style>

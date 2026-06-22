@@ -58,7 +58,8 @@ function toolDesdeVariable(name = '') {
 function tituloVariable(name = '') {
   const field = name.split('.').pop();
 
-  if (name.startsWith('toolResults.')) return `${name} - resultado final guardado por el backend`;
+  if (name.startsWith('toolResultsPostReconcile')) return `${name} - findings finales sincronizados por herramienta`;
+  if (name.startsWith('toolResults.')) return `${name} - resultado operativo pre-reconciliacion`;
   if (field === 'binario') return `${name} - binario ejecutado`;
   if (field === 'args') return `${name} - argumentos enviados`;
   if (field === 'comando') return `${name} - comando ejecutado`;
@@ -117,7 +118,7 @@ function crearScanLogger(target) {
       append('############################################################');
       append(`# HERRAMIENTA / MODULO: ${tool}`);
       append('############################################################');
-      append('Orden de lectura: programa/argumentos -> datos enviados -> salida bruta -> salida parseada -> toolResults final.');
+      append('Orden de lectura: programa/argumentos -> datos enviados -> salida bruta -> salida parseada -> toolResults operativo -> toolResultsPostReconcile final.');
     } else if (!tool && currentTool) {
       currentTool = null;
       append('');
@@ -161,7 +162,8 @@ function crearScanLogger(target) {
   append('- *.input indica los datos enviados a la herramienta.');
   append('- *.raw o *Output es salida bruta.');
   append('- *.parsed es la salida parseada por el backend.');
-  append('- toolResults.* es el objeto final que el backend conserva para esa herramienta.');
+  append('- toolResults.* durante la ejecucion es el resultado operativo previo a reconciliacion.');
+  append('- toolResultsPostReconcile.* es la vista final usada por PDF e interfaz.');
 
   return {
     file,

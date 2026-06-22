@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { COLORS, SEVERITY, FONTS, PAGE } = require('./pdfStyles');
 const { drawDonutChart, drawHorizontalChart, drawRiskGauge, drawSeverityBars } = require('./pdfCharts');
-const { buildImpactText, getAsset, getFinalSeverity, normalizeSeverity, safeArray, text, truncate } = require('./pdfUtils');
+const { buildImpactText, displayTool, getAsset, getFinalSeverity, getFinalStatus, normalizeSeverity, probabilityDisplay, safeArray, text, truncate } = require('./pdfUtils');
 
 function getLogoPath() {
   const logoPath = path.join(__dirname, '../../../frontend/assets/site-logo.png');
@@ -163,10 +163,10 @@ function drawCover(doc, report) {
 
 function scoreToSeverity(score) {
   if (score === null || score === undefined) return 'info';
-  if (score > 80) return 'critical';
-  if (score > 60) return 'high';
-  if (score > 40) return 'medium';
-  if (score > 20) return 'low';
+  if (score >= 90) return 'critical';
+  if (score >= 50) return 'high';
+  if (score >= 25) return 'medium';
+  if (score > 0) return 'low';
   return 'info';
 }
 
@@ -178,8 +178,10 @@ function drawExecutiveSummary(doc, report) {
     `Se ha analizado ${report.target} mediante un pipeline automatizado de reconocimiento, validacion y correlacion de hallazgos web.`,
     `Las herramientas registradas incluyen ${tools}. GF se trata como priorizador de candidatos y no como confirmacion de vulnerabilidades.`,
     `El nivel de riesgo general es ${report.risk.label} con score ${text(report.risk.score, 'N/D')}/100. Se identificaron ${report.groups.confirmed.length} vulnerabilidades confirmadas y ${report.groups.possible.length} posibles vulnerabilidades que requieren validacion manual o evidencia adicional.`,
+    `Fuente del score: ${report.risk.source === 'ai_global_review' ? 'revision IA global sobre todos los hallazgos enriquecidos' : 'pendiente de revision IA global'}. La puntuacion combina criticidad potencial, probabilidad real, estado, evidencia tecnica y correlaciones.`,
+    report.risk.reason ? `Justificacion de la revision IA global: ${report.risk.reason}` : null,
     `Tambien se han separado ${report.groups.gfCandidates.length} candidatos GF, ${report.groups.hardening.length} hallazgos de hardening y ${report.groups.attackSurface.length} elementos de superficie de ataque para mantener trazabilidad sin exagerar la criticidad.`
-  ].join('\n\n');
+  ].filter(Boolean).join('\n\n');
 
   doc.font(FONTS.regular).fontSize(9.4);
   const paragraphHeight = doc.heightOfString(paragraph, {
@@ -200,33 +202,6 @@ function drawExecutiveSummary(doc, report) {
   doc.y = y + panelHeight + 18;
 }
 
-function drawMetrics(doc, report) {
-  const cols = 4;
-  const gap = 10;
-  const cardWidth = (PAGE.contentWidth - (gap * (cols - 1))) / cols;
-  const cardHeight = 58;
-  const rows = Math.ceil(report.metrics.length / cols);
-
-  ensureSpace(doc, 78 + rows * (cardHeight + gap));
-  sectionTitle(doc, 'Panel de metricas', 'Indicadores');
-  const { left } = pageBounds(doc);
-  const startY = doc.y;
-
-  report.metrics.forEach((item, index) => {
-    const row = Math.floor(index / cols);
-    const col = index % cols;
-    const x = left + col * (cardWidth + gap);
-    const y = startY + row * (cardHeight + gap);
-    panel(doc, x, y, cardWidth, cardHeight, { fill: COLORS.panelSoft, accent: severityColor(item.accent) });
-    doc.font(FONTS.bold).fontSize(19).fillColor(COLORS.text);
-    fixedText(doc, String(item.value), x + 12, y + 12, { width: cardWidth - 24, height: 22 });
-    doc.font(FONTS.regular).fontSize(7.5).fillColor(COLORS.muted);
-    fixedText(doc, item.label, x + 12, y + 37, { width: cardWidth - 24, height: 10 });
-  });
-
-  doc.y = startY + rows * (cardHeight + gap) + 8;
-}
-
 function drawCharts(doc, report) {
   ensureSpace(doc, 410);
   sectionTitle(doc, 'Graficas', 'Visualizacion');
@@ -238,8 +213,10 @@ function drawCharts(doc, report) {
   const chartPanelHeight = 216;
 
   panel(doc, left, y, half, chartPanelHeight, { fill: COLORS.panel });
-  doc.font(FONTS.bold).fontSize(10).fillColor(COLORS.text).text('Distribucion global por severidad', left + 14, y + 14, { width: half - 28 });
-  drawSeverityBars(doc, left + 14, y + 42, half - 28, report.groups.severity);
+  doc.font(FONTS.bold).fontSize(10).fillColor(COLORS.text).text('Distribucion tecnica total', left + 14, y + 14, { width: half - 28 });
+  doc.font(FONTS.regular).fontSize(6.8).fillColor(COLORS.subtle)
+    .text('Incluye vulnerabilidades, candidatos, hardening y superficie; no todo es explotable.', left + 14, y + 28, { width: half - 28 });
+  drawSeverityBars(doc, left + 14, y + 52, half - 28, report.groups.severityTechnical || report.groups.severityGlobal || report.groups.severity);
 
   panel(doc, left + half + gap, y, half, chartPanelHeight, { fill: COLORS.panel });
   doc.font(FONTS.bold).fontSize(10).fillColor(COLORS.text).text('Resultados tecnicos por herramienta', left + half + gap + 14, y + 14, { width: half - 28 });
@@ -262,15 +239,26 @@ function drawCharts(doc, report) {
   panel(doc, left, doc.y, PAGE.contentWidth, 96, { fill: COLORS.panel });
   doc.font(FONTS.bold).fontSize(10).fillColor(COLORS.text).text('Score global de riesgo', left + 16, doc.y + 14);
   drawRiskGauge(doc, left + 16, doc.y + 42, PAGE.contentWidth - 32, report.risk.score);
-  doc.y += 112;
+  doc.font(FONTS.regular).fontSize(7).fillColor(COLORS.subtle)
+    .text(report.risk.breakdown?.explanation || 'El score prioriza vulnerabilidades confirmadas y evidencia de explotacion; candidatos, hardening y superficie tienen peso limitado.', left + 16, doc.y + 86, {
+      width: PAGE.contentWidth - 32,
+      lineGap: 1
+    });
+  doc.y += 126;
 }
 
 function drawFindingsSummaryTable(doc, report) {
-  sectionTitle(doc, 'Tabla resumen de vulnerabilidades', 'Trazabilidad');
-  const rows = [...report.groups.confirmed, ...report.groups.possible];
+  sectionTitle(doc, 'Tabla resumen de hallazgos', 'Trazabilidad');
+  const rows = [
+    ...report.groups.confirmed,
+    ...report.groups.possible,
+    ...report.groups.gfCandidates,
+    ...report.groups.hardening,
+    ...report.groups.attackSurface
+  ];
   const { left } = pageBounds(doc);
-  const widths = [58, 156, 62, 154, 58, 55];
-  const headers = ['Severidad', 'Titulo', 'Tool', 'Activo', 'Conf.', 'Estado'];
+  const widths = [50, 42, 100, 52, 44, 112, 64, 56];
+  const headers = ['Sev. potencial', 'Prob. real', 'Titulo', 'Estado', 'Tool', 'Activo', 'CVSS-like', 'Conf.'];
 
   if (!rows.length) {
     emptyPanel(doc, 'No hay vulnerabilidades confirmadas o posibles que listar.');
@@ -283,15 +271,25 @@ function drawFindingsSummaryTable(doc, report) {
     const y = doc.y;
     doc.rect(left, y, PAGE.contentWidth, 30).fill(COLORS.panelAlt);
     doc.moveTo(left, y + 30).lineTo(left + PAGE.contentWidth, y + 30).strokeColor(COLORS.borderSoft).lineWidth(0.5).stroke();
-    const state = report.groups.confirmed.includes(finding) ? 'Confirmada' : 'Posible';
+    const state = report.groups.confirmed.includes(finding)
+      ? 'Confirmada'
+      : report.groups.possible.includes(finding)
+        ? 'Posible'
+        : report.groups.gfCandidates.includes(finding)
+          ? 'Candidato'
+          : report.groups.hardening.includes(finding)
+            ? 'Hardening'
+            : 'Superficie';
     const finalSeverity = getFinalSeverity(finding);
     const values = [
       severityLabel(finalSeverity),
-      truncate(finding.title, 58),
-      text(finding.tool, '-'),
-      truncate(getAsset(finding), 64),
-      text(finding.confidence, '-'),
-      state
+      probabilityDisplay(finding),
+      truncate(finding.title, 48),
+      state,
+      text(displayTool(finding), '-'),
+      truncate(getAsset(finding), 54),
+      finding.cvssLikeScore === null || finding.cvssLikeScore === undefined ? 'N/A' : Number(finding.cvssLikeScore).toFixed(1),
+      text(finding.confidence, '-')
     ];
     let x = left;
     values.forEach((value, index) => {
@@ -302,6 +300,11 @@ function drawFindingsSummaryTable(doc, report) {
     });
     doc.y += 30;
   });
+  doc.font(FONTS.regular).fontSize(7).fillColor(COLORS.subtle)
+    .text('La probabilidad real es una estimacion basada en evidencia tecnica y, cuando procede, revision IA. No representa una certeza matematica.', left, doc.y + 4, {
+      width: PAGE.contentWidth,
+      lineGap: 1
+    });
   doc.moveDown(0.7);
 }
 
@@ -326,6 +329,16 @@ function emptyPanel(doc, message) {
   doc.y += 58;
 }
 
+function drawProbabilityBlock(doc, finding, x, y) {
+  const value = probabilityDisplay(finding);
+  if (value === 'N/A' || value === 'N/D') return;
+  panel(doc, x, y, 82, 34, { fill: COLORS.panelAlt, stroke: COLORS.low });
+  doc.font(FONTS.bold).fontSize(13).fillColor(COLORS.cyan);
+  fixedText(doc, value, x + 8, y + 6, { width: 66, align: 'center', height: 14 });
+  doc.font(FONTS.regular).fontSize(5.7).fillColor(COLORS.subtle);
+  fixedText(doc, 'PROB. REAL', x + 8, y + 22, { width: 66, align: 'center', height: 8 });
+}
+
 function findingHeight(doc, finding) {
   const titleHeight = doc.font(FONTS.bold).fontSize(12).heightOfString(text(finding.title, 'Hallazgo sin titulo'), { width: PAGE.contentWidth - 32 });
   const assetHeight = doc.font(FONTS.regular).fontSize(8).heightOfString(text(getAsset(finding)), { width: PAGE.contentWidth - 32 });
@@ -336,10 +349,11 @@ function findingHeight(doc, finding) {
   const correlationHeight = safeArray(finding.correlation_notes).length
     ? doc.font(FONTS.regular).fontSize(7).heightOfString(`Correlacion: ${truncate(finding.correlation_notes.join(' | '), 160)}`, { width: PAGE.contentWidth - 32 })
     : 0;
+  const candidateHeight = getFinalStatus(finding) === 'candidate' ? 20 : 0;
 
   return Math.max(
     170,
-    30 + titleHeight + 34 + 34 + assetHeight + 28 + Math.max(evidenceHeight, 20) + 30 + Math.max(impactHeight, recHeight, 20) + correlationHeight + 42
+    30 + titleHeight + 34 + 34 + assetHeight + 28 + Math.max(evidenceHeight, 20) + 30 + Math.max(impactHeight, recHeight, 20) + candidateHeight + correlationHeight + 42
   );
 }
 
@@ -353,17 +367,20 @@ function drawFindingCard(doc, finding, state) {
   panel(doc, left, y, PAGE.contentWidth, height, { fill: COLORS.panel, accent: severityColor(sev) });
   chip(doc, left + 16, y + 14, severityLabel(sev).toUpperCase(), severityColor(sev));
   chip(doc, left + 96, y + 14, state.toUpperCase(), state === 'Confirmada' ? COLORS.success : COLORS.medium);
+  drawProbabilityBlock(doc, finding, left + PAGE.contentWidth - 98, y + 10);
   doc.font(FONTS.bold).fontSize(12).fillColor(COLORS.text).text(text(finding.title, 'Hallazgo sin titulo'), left + 16, y + 40, {
-    width: PAGE.contentWidth - 32
+    width: PAGE.contentWidth - 122
   });
   const titleBottom = doc.y;
 
   const metaY = Math.max(y + 74, titleBottom + 10);
-  smallMeta(doc, 'Herramienta', finding.tool, left + 16, metaY, 110);
-  smallMeta(doc, 'Confianza', finding.confidence, left + 134, metaY, 90);
-  smallMeta(doc, 'CWE', finding.cwe, left + 234, metaY, 72);
-  smallMeta(doc, 'CVSS', finding.cvss, left + 314, metaY, 64);
-  smallMeta(doc, 'OWASP', finding.owasp || finding.owasp_top10, left + 384, metaY, 118);
+  const probabilityValue = probabilityDisplay(finding);
+  smallMeta(doc, 'Herramienta', displayTool(finding), left + 16, metaY, 140);
+  if (probabilityValue === 'N/A' || finding.aiEnrichmentPending === true || finding.aiStatus === 'failed') {
+    smallMeta(doc, 'Verificacion', finding.aiEnrichmentPending === true || finding.aiStatus === 'failed' ? 'Pendiente IA' : 'Observado', left + 166, metaY, 104);
+  }
+  smallMeta(doc, 'CVSS-like', finding.cvssLikeScore === null || finding.cvssLikeScore === undefined ? 'N/A' : Number(finding.cvssLikeScore).toFixed(1), left + 286, metaY, 82);
+  smallMeta(doc, 'OWASP', finding.owasp || finding.owasp_top10, left + 380, metaY, 122);
 
   const assetY = metaY + 38;
   doc.font(FONTS.bold).fontSize(7).fillColor(COLORS.subtle).text('ACTIVO AFECTADO', left + 16, assetY);
@@ -388,6 +405,12 @@ function drawFindingCard(doc, finding, state) {
   const recommendationBottom = doc.y;
 
   let extraBottom = Math.max(impactBottom, recommendationBottom);
+  if (getFinalStatus(finding) === 'candidate') {
+    const validationY = extraBottom + 12;
+    doc.font(FONTS.bold).fontSize(7).fillColor(COLORS.info)
+      .text('CRITICIDAD POTENCIAL SI SE CONFIRMA: candidato priorizado por GF; requiere validacion manual y no constituye una vulnerabilidad confirmada.', left + 16, validationY, { width: PAGE.contentWidth - 32 });
+    extraBottom = doc.y;
+  }
   if (safeArray(finding.correlation_notes).length) {
     const correlationY = extraBottom + 12;
     doc.font(FONTS.regular).fontSize(7).fillColor(COLORS.low)
@@ -429,8 +452,7 @@ function drawGfCandidates(doc, report) {
     emptyPanel(doc, 'No se identificaron candidatos GF.');
     return;
   }
-
-  report.groups.gfCandidates.forEach(finding => drawFindingCard(doc, finding, 'Candidato GF'));
+  report.groups.gfCandidates.forEach(finding => drawFindingCard(doc, finding, 'Candidato'));
 }
 
 function drawHardening(doc, report) {
@@ -463,7 +485,7 @@ function drawSurface(doc, report) {
     doc.moveTo(left, y + 28).lineTo(left + PAGE.contentWidth, y + 28).strokeColor(COLORS.borderSoft).lineWidth(0.5).stroke();
     const finalSeverity = getFinalSeverity(finding);
     const values = [
-      text(finding.tool, '-'),
+      text(displayTool(finding), '-'),
       truncate(finding.title, 44),
       truncate(getAsset(finding), 106),
       severityLabel(finalSeverity)
@@ -501,8 +523,13 @@ function drawCorrelations(doc, report) {
 
 function drawRecommendations(doc, report) {
   sectionTitle(doc, 'Recomendaciones priorizadas', 'Remediacion');
+  const primaryColor = report.recommendations.primarySeverity === 'critical'
+    ? COLORS.critical
+    : report.recommendations.primarySeverity === 'high'
+      ? COLORS.high
+      : COLORS.medium;
   const groups = [
-    ['Acciones criticas inmediatas', report.recommendations.critical, COLORS.critical],
+    [report.recommendations.primaryTitle || 'Acciones prioritarias', report.recommendations.primary || report.recommendations.critical, primaryColor],
     ['Acciones de corto plazo', report.recommendations.shortTerm, COLORS.high],
     ['Mejoras de hardening', report.recommendations.hardening, COLORS.low],
     ['Validaciones manuales recomendadas', report.recommendations.manual, COLORS.medium]
@@ -535,9 +562,32 @@ function drawBulletPanel(doc, title, items, accent) {
 
 function drawTechnicalAnnex(doc, report) {
   sectionTitle(doc, 'Anexo tecnico', 'Ejecucion');
+  drawAiCoverage(doc, report);
   drawTimeline(doc, report);
   drawToolStatus(doc, report);
   drawLimitations(doc, report);
+}
+
+function drawAiCoverage(doc, report) {
+  const stats = report.aiStats || {};
+  const total = Number(stats.totalReportableFindings || 0);
+  const processed = Number(stats.aiProcessed || 0);
+  const failed = Number(stats.aiFailed || Math.max(0, total - processed));
+  const complete = total === processed && failed === 0 && Number(stats.templateUsedFinal || 0) === 0;
+  drawBulletPanel(doc, 'Cobertura de inteligencia artificial', [
+    complete
+      ? `[SUCCESS] analisis ia - ${processed}/${total} hallazgos enriquecidos por IA, templates finales usados: ${Number(stats.templateUsedFinal || 0)}`
+      : `[PARTIAL] analisis ia - ${processed}/${total} hallazgos enriquecidos por IA, ${failed} pendientes, templates finales usados: ${Number(stats.templateUsedFinal || 0)}`,
+    `[AI] modo: complete`,
+    `[AI] hallazgos reportables: ${total}`,
+    `[AI] llamadas individuales realizadas: ${Number(stats.aiCallsMade ?? stats.callsMade ?? 0)}`,
+    `[AI] enriquecidos correctamente: ${processed}`,
+    `[AI] fallidos: ${failed}`,
+    `[AI] templates finales usados: ${Number(stats.templateUsedFinal || 0)}`,
+    report.risk.score === null || report.risk.score === undefined
+      ? `[PARTIAL] score global ia - pendiente ${complete ? 'por respuesta IA global no valida' : 'por cobertura incompleta'}`
+      : `[SUCCESS] score global ia - ${report.risk.score}/100 Riesgo ${report.risk.label}`
+  ], complete ? COLORS.success : COLORS.medium);
 }
 
 function drawTimeline(doc, report) {
@@ -598,7 +648,7 @@ function drawLimitations(doc, report = {}) {
   drawBulletPanel(doc, 'Limitaciones del analisis', [
     'Los resultados automatizados dependen de la accesibilidad del objetivo, permisos, WAF, timeouts y profundidad configurada.',
     'Los candidatos de GF y superficie descubierta requieren validacion manual antes de tratarlos como vulnerabilidades confirmadas.',
-    'No se generan CVE, CVSS, CWE u OWASP si no existen en la evidencia recibida.',
+    'No se inventan CVE ni puntuaciones CVSS oficiales. La columna CVSS-like es una estimacion inspirada en CVSS validada por guardrails.',
     ...safeArray(report.limitations)
   ], COLORS.medium);
 
@@ -642,7 +692,6 @@ module.exports = {
   drawFindingsSummaryTable,
   drawHardening,
   drawHeaderFooter,
-  drawMetrics,
   drawPageBackground,
   drawRecommendations,
   drawSurface,

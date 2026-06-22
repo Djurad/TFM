@@ -185,7 +185,14 @@ function clasificarFinding(raw = {}) {
 
   if (tool === 'gf') {
     type = 'gf_candidate';
-    severity = ['medium', 'low'].includes(severityOriginal) ? severityOriginal : 'low';
+    const gfVector = String(raw.vulnerability_type || raw.pattern || raw.family || raw.title || '').toLowerCase();
+    severity = /\brce\b|command/.test(gfVector)
+      ? 'critical'
+      : /sqli|sql injection|ssrf|lfi|rfi/.test(gfVector)
+        ? 'high'
+        : /xss|redirect/.test(gfVector)
+          ? 'medium'
+          : severityOriginal;
     confidence = 'low';
     isVulnerability = false;
     isFalsePositiveLikely = false;
@@ -286,10 +293,12 @@ function clasificarFinding(raw = {}) {
   }
 
   if (tool === 'sqlmap') {
-    const evidenciaConcluyente = Boolean(raw.payload || raw.dbms || raw.parametro || raw.parameter);
+    const evidenciaConcluyente = Boolean(raw.payload || raw.dbms || /extraccion|extracción|dump|dbms|payload/i.test(String(raw.evidence || raw.evidencia || '')));
     if ((raw.status === 'confirmed_sqli' || raw.vulnerable === true) && evidenciaConcluyente) {
       type = 'confirmed_vulnerability';
-      severity = 'critical';
+      severity = /extraccion|extracción|dump|bypass|escritura|write/i.test(String(raw.evidence || raw.evidencia || raw.raw_reference || ''))
+        ? 'critical'
+        : 'high';
       confidence = 'high';
       isVulnerability = true;
       isFalsePositiveLikely = false;
@@ -297,7 +306,7 @@ function clasificarFinding(raw = {}) {
     } else if (raw.status === 'possible_sqli') {
       type = 'possible_vulnerability';
       severity = 'high';
-      confidence = 'medium';
+      confidence = raw.payload || raw.dbms ? 'medium' : 'low';
       isVulnerability = true;
       isFalsePositiveLikely = false;
       falsePositiveReason = '';

@@ -202,6 +202,8 @@ function getFinalSeverity(finding = {}) {
   return normalizeSeverity(
     finding.finalSeverity ||
     finding.final_severity ||
+    finding.potentialSeverity ||
+    finding.potential_severity ||
     finding.aiSuggestedSeverity ||
     finding.ai_suggested_severity ||
     finding.baseSeverity ||
@@ -444,9 +446,116 @@ function lowerFirst(value = '') {
   return clean ? clean.charAt(0).toLowerCase() + clean.slice(1) : clean;
 }
 
+function impactSearchText(finding = {}) {
+  return [
+    finding.title,
+    finding.tool,
+    finding.type,
+    finding.category,
+    finding.vulnerability_type,
+    finding.evidence,
+    finding.impact,
+    finding.severityReason,
+    finding.aiReasoningSummary,
+    finding.affected_url,
+    finding.affected_asset
+  ].filter(Boolean).join(' ').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
+function hasDemonstratedCriticalImpact(finding = {}) {
+  const text = impactSearchText(finding);
+  return getFinalSeverity(finding) === 'critical' ||
+    finding.sessionCompromise === true ||
+    finding.session_compromise === true ||
+    finding.sensitiveDataAccess === true ||
+    finding.sensitive_data_access === true ||
+    finding.dataExtraction === true ||
+    finding.data_extraction === true ||
+    /robo de sesion demostrado|extraccion.*confirmad|datos sensibles.*confirmad|acceso no autorizado demostrado/.test(text);
+}
+
+function impactTemplateForFinding(finding = {}) {
+  const text = impactSearchText(finding);
+  const status = getFinalStatus(finding);
+  const severity = getFinalSeverity(finding);
+  const tool = String(finding.tool || '').toLowerCase();
+
+  if (status === 'confirmed' && /\bxss\b|dalfox/.test(text) && severity !== 'critical') {
+    return 'La vulnerabilidad permite inyectar JavaScript en el parametro afectado. El riesgo es alto porque existe un payload reproducible confirmado por la herramienta y la ausencia de CSP puede aumentar el impacto potencial en usuarios. No se eleva a critica al no existir evidencia de robo de sesion, ejecucion privilegiada o acceso a datos sensibles.';
+  }
+
+  if (status === 'possible' && (tool === 'sqlmap' || /possible_sqli|sql injection|sqli/.test(text))) {
+    return 'SQLMap identifico indicios compatibles con SQL Injection, pero no confirmo parametro vulnerable, payload, DBMS ni extraccion de datos. Debe tratarse como posible vulnerabilidad de prioridad media y validarse manualmente.';
+  }
+
+  if (/content-security-policy|csp/.test(text)) {
+    return 'La ausencia de CSP reduce la capacidad del navegador para limitar la ejecucion de scripts no autorizados. Por si sola es un hallazgo de hardening, pero aumenta la prioridad cuando existe un XSS confirmado.';
+  }
+
+  if (/cookie/.test(text) && /samesite/.test(text)) {
+    return 'La cookie de sesion no define SameSite, lo que puede aumentar la exposicion en ciertos flujos cross-site. No implica compromiso directo por si sola, pero conviene reforzar la configuracion.';
+  }
+
+  if (/httpsredirect|http sin redirect|http accesible sin redireccion|redireccion.*https/.test(text)) {
+    return 'El sitio responde por HTTP sin redirigir automaticamente a HTTPS. Esto puede exponer a usuarios a trafico no cifrado o ataques de degradacion si acceden por el canal inseguro.';
+  }
+
+  if (/tls|certificado/.test(text) && /expirar|caduca|expiry|near/.test(text)) {
+    return 'El certificado TLS caduca proximamente, lo que puede provocar errores de confianza o interrupciones si no se renueva a tiempo.';
+  }
+
+  if (status === 'candidate' || tool === 'gf') {
+    return 'GF ha identificado un patron asociado a este vector, pero no confirma explotacion. Debe utilizarse como priorizacion para validacion manual, no como vulnerabilidad confirmada.';
+  }
+
+  if (status === 'surface') {
+    return 'Este elemento amplia la superficie de ataque y debe revisarse para confirmar si requiere exposicion publica, autenticacion o restricciones adicionales.';
+  }
+
+  return '';
+}
+
+function cleanImpactLanguage(value = '', finding = {}) {
+  let clean = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!clean) return '';
+
+  clean = clean
+    .replace(/se\s+clasifica\s+con\s+esta\s+severidad\s+porque\s+la\s+(?:gravedad|criticidad|severidad)[^.,;]*?\s+se\s+debe\s+a\s+que\s+/gi, '')
+    .replace(/se\s+clasifica\s+con\s+esta\s+severidad\s+porque\s+/gi, '')
+    .replace(/se\s+clasifica\s+como\s+(?:critica|crítica|alta|media|baja|informativa|critical|high|medium|low|info)\s+porque\s+/gi, 'La prioridad se justifica porque ')
+    .replace(/la\s+(?:criticidad|gravedad|severidad)\s+(?:critica|crítica|alta|media|baja|informativa|critical|high|medium|low|info)\s+se\s+debe\s+a\s+que\s+/gi, 'La prioridad se justifica porque ')
+    .replace(/la\s+(?:criticidad|gravedad|severidad)\s+se\s+establece\s+en\s+[^.,;]*?\s+porque\s+/gi, 'La prioridad se justifica porque ')
+    .replace(/\b(?:criticidad|gravedad|severidad)\s+(?:critica|crítica|alta|media|baja)\s+debido\s+a\s+que\s+/gi, 'La prioridad se justifica porque ')
+    .replace(/\bdebido\s+a\s+que\s+debido\s+a\s+que\b/gi, 'debido a que')
+    .replace(/\bLa prioridad se justifica porque la prioridad se justifica porque\b/gi, 'La prioridad se justifica porque')
+    .replace(/\bla evidencia disponible indica que\b/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  clean = clean
+    .replace(/cambio\s+de\s+(?:criticidad|severidad)\s+descartado[^.]*\.?/gi, '')
+    .replace(/la\s+evidencia\s+disponible\s+indica\s+que\s+/gi, '')
+    .replace(/la\s+prioridad\s+se\s+justifica\s+porque\s+/gi, '')
+    .replace(/exploataci[oó]n/gi, 'explotacion')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!hasDemonstratedCriticalImpact(finding)) {
+    clean = clean
+      .replace(/\b(?:la\s+)?toma de control del sistema\b/gi, 'un impacto mayor no demostrado')
+      .replace(/\bextracci[oó]n de datos sensibles\b/gi, 'exposicion potencial no demostrada')
+      .replace(/\bcompromiso critico\b/gi, 'impacto elevado')
+      .replace(/\bcr[ií]tico\b/gi, getFinalSeverity(finding) === 'critical' ? 'critico' : 'alto')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  return clean;
+}
+
 function mergeWithoutDuplication(base = '', extra = '') {
-  const baseText = String(base || '').trim();
-  const extraText = String(extra || '').trim();
+  const baseText = cleanImpactLanguage(base);
+  const extraText = cleanImpactLanguage(extra);
   if (!baseText) return extraText;
   if (!extraText) return baseText;
 
@@ -455,14 +564,31 @@ function mergeWithoutDuplication(base = '', extra = '') {
   if (!extraNormalized || baseNormalized.includes(extraNormalized)) return baseText;
   if (!baseNormalized || extraNormalized.includes(baseNormalized)) return extraText;
 
-  const formattedExtra = /^(se\s+clasifica|la\s+criticidad|la\s+severidad|severidad|criticidad|porque|debido)/i.test(extraText)
+  const formattedExtra = /^(el\s+riesgo|la\s+prioridad|la\s+evidencia|en\s+este\s+caso|no\s+se\s+eleva|se\s+mantiene|debe\s+tratarse|debe\s+validarse)/i.test(extraText)
     ? extraText
-    : `Se clasifica con esta severidad porque ${lowerFirst(extraText)}`;
+    : `El riesgo es relevante porque ${lowerFirst(extraText)}`;
 
-  return `${baseText.replace(/[.。]\s*$/, '')}. ${formattedExtra}`;
+  return cleanImpactLanguage(`${baseText.replace(/[.。]\s*$/, '')}. ${formattedExtra}`);
+}
+
+function requiresAIEnrichment(finding = {}) {
+  return ['confirmed', 'possible', 'candidate', 'hardening', 'surface', 'informational'].includes(getFinalStatus(finding)) && (
+    finding.aiProcessed !== true ||
+    finding.impactSource !== 'ai' ||
+    finding.recommendationSource !== 'ai'
+  );
 }
 
 function buildImpactText(finding = {}) {
+  if (requiresAIEnrichment(finding) || finding.aiEnrichmentPending === true || finding.aiStatus === 'failed') {
+    return 'Pendiente de enriquecimiento IA. No existe un impacto final validado por IA para este hallazgo.';
+  }
+  if (finding.impact && finding.impactSource) {
+    return cleanImpactLanguage(finding.impact, finding);
+  }
+  const template = impactTemplateForFinding(finding);
+  if (template) return cleanImpactLanguage(template, finding);
+
   const impactBase = finding.impact ||
     finding.technicalImpact ||
     finding.technical_impact ||
@@ -479,7 +605,7 @@ function buildImpactText(finding = {}) {
     finding.ai_reasoning_summary ||
     '';
 
-  return mergeWithoutDuplication(impactBase, severityExplanation) ||
+  return cleanImpactLanguage(mergeWithoutDuplication(impactBase, severityExplanation), finding) ||
     'No disponible. Requiere revision tecnica segun el contexto del activo.';
 }
 
@@ -696,6 +822,8 @@ function sortFindingsByPriority(findings = []) {
     const catB = categoriaFinding(b);
     return prioridadHallazgo(a) - prioridadHallazgo(b) ||
       prioridadSeveridad(getFinalSeverity(a)) - prioridadSeveridad(getFinalSeverity(b)) ||
+      Number(b.practicalRiskScore || 0) - Number(a.practicalRiskScore || 0) ||
+      Number(b.realVulnerabilityProbabilityPercent || 0) - Number(a.realVulnerabilityProbabilityPercent || 0) ||
       prioridadCategoria(catA) - prioridadCategoria(catB) ||
       String(a.tool || '').localeCompare(String(b.tool || ''));
   });
@@ -775,9 +903,35 @@ function textoFinding(finding = {}) {
     finding.description,
     finding.evidence,
     finding.type,
-    finding.tool,
+    finding.displayTool || finding.sourceTool || finding.tool || finding.source,
     buildImpactText(finding)
   ].filter(Boolean).join(' ').toLowerCase();
+}
+
+function displayToolFinding(finding = {}) {
+  if (finding.displayTool) return finding.displayTool;
+  if (Array.isArray(finding.sourceTools) && finding.sourceTools.length > 1) {
+    return finding.sourceTools.map(tool => String(tool || '').replace(/^./, char => char.toUpperCase())).join('/');
+  }
+  const raw = finding.sourceTool || finding.tool || finding.source || 'tool';
+  const key = String(raw).split(':')[0].toLowerCase();
+  return { gf: 'GF', gau: 'Gau', katana: 'Katana', feroxbuster: 'Feroxbuster', dalfox: 'Dalfox', sqlmap: 'SQLMap', tls: 'TLS' }[key] || raw;
+}
+
+function probabilityPercentValue(finding = {}) {
+  const values = [
+    finding.realVulnerabilityProbabilityPercent,
+    finding.probabilityFinal,
+    finding.finalProbability,
+    finding.probabilityAISuggested
+  ];
+  for (const value of values) {
+    if (value === null || value === undefined || value === '') continue;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) continue;
+    return Math.round(Math.max(0, Math.min(100, parsed <= 1 ? parsed * 100 : parsed)));
+  }
+  return null;
 }
 
 function nivelVisualFinding(finding = {}) {
@@ -828,28 +982,67 @@ function renderFindingDetail(label, icon, value, fallbackText) {
   `;
 }
 
+function probabilityText(finding = {}) {
+  const status = getFinalStatus(finding);
+  if (['hardening', 'surface', 'informational'].includes(status) || finding.probabilityLabel === 'no_aplica') {
+    return 'N/A';
+  }
+  const percent = probabilityPercentValue(finding);
+  if (percent === null) return 'No disponible';
+  return `${percent}%`;
+}
+
+function probabilityApplicable(finding = {}) {
+  return ['confirmed', 'possible', 'candidate'].includes(getFinalStatus(finding)) &&
+    probabilityPercentValue(finding) !== null;
+}
+
+function renderProbabilityBadge(finding = {}) {
+  if (!probabilityApplicable(finding)) return '';
+  const percent = probabilityPercentValue(finding);
+  return `
+    <div class="probability-highlight" aria-label="Probabilidad real ${escaparHtml(percent)} por ciento">
+      <div><strong>${escaparHtml(percent)}%</strong><span>PROB. REAL</span></div>
+      <i><b style="width:${escaparHtml(percent)}%"></b></i>
+    </div>
+  `;
+}
+
 function renderFindingCard(finding = {}) {
   const nivel = nivelVisualFinding(finding);
   const categoria = categoriaFinding(finding);
+  const status = getFinalStatus(finding);
+  const verificationText = finding.aiEnrichmentPending === true || finding.aiStatus === 'failed' ? 'Pendiente IA' : 'Observado';
+  const recommendationText = requiresAIEnrichment(finding) || finding.aiEnrichmentPending === true || finding.aiStatus === 'failed'
+    ? 'Pendiente de enriquecimiento IA. No existe una recomendacion final validada por IA para este hallazgo.'
+    : finding.recommendation;
   return `
     <article class="finding-card finding-${escaparHtml(nivel.key)} ${vistaCompacta ? 'compact' : ''}">
       <header>
-        <span class="finding-severity"><i class="fas ${escaparHtml(nivel.icon)}"></i> ${escaparHtml(nivel.label)}</span>
-        <span class="terminal-badge">[${escaparHtml(fallback(finding.tool, 'tool'))}]</span>
+        <span class="finding-severity" title="Criticidad potencial si el hallazgo se confirma"><i class="fas ${escaparHtml(nivel.icon)}"></i> ${escaparHtml(nivel.label)}</span>
+        <span class="terminal-badge finding-status">[${escaparHtml(categoria)}]</span>
+        <span class="terminal-badge">[${escaparHtml(displayToolFinding(finding))}]</span>
+        ${renderProbabilityBadge(finding)}
       </header>
       <h3>${escaparHtml(fallback(finding.title, 'Hallazgo sin titulo'))}</h3>
       ${vistaCompacta ? '' : `<p>${escaparHtml(descripcionCorta(finding))}</p>`}
       <div class="finding-meta">
-        <span><i class="fas fa-layer-group"></i> ${escaparHtml(categoria)}</span>
+        ${probabilityApplicable(finding) ? '' : `<span><i class="fas fa-check-circle"></i> Verificacion: ${escaparHtml(verificationText)}</span>`}
         <span><i class="fas fa-crosshairs"></i> ${escaparHtml(fallback(finding.affected_url || finding.affected_asset || ultimoAnalisis?.target, '-'))}</span>
+        ${finding.cvssLikeScore !== null && finding.cvssLikeScore !== undefined ? `<span><i class="fas fa-gauge-high"></i> CVSS-like: ${escaparHtml(Number(finding.cvssLikeScore).toFixed(1))}</span>` : ''}
         ${finding.severityChangedByAI
           ? `<span><i class="fas fa-wand-magic-sparkles"></i> IA: ${escaparHtml(finding.baseSeverity || 'base')} -> ${escaparHtml(getFinalSeverity(finding))}</span>`
           : ''}
       </div>
       ${vistaCompacta ? '' : `
+        ${status === 'candidate' ? `
+          <div class="finding-note candidate-note">
+            Criticidad potencial si se confirma. Este hallazgo es un candidato priorizado por GF, no una vulnerabilidad confirmada, y requiere validacion manual.
+          </div>
+        ` : ''}
         <div class="finding-analysis">
           ${renderFindingDetail('Impacto', 'fa-bolt', buildImpactText(finding), 'No disponible. Requiere revision tecnica segun el contexto del activo.')}
-          ${renderFindingDetail('Solucion recomendada', 'fa-screwdriver-wrench', finding.recommendation, 'No disponible. Validar el hallazgo y aplicar la remediacion correspondiente.')}
+          ${renderFindingDetail('Solucion recomendada', 'fa-screwdriver-wrench', recommendationText, 'Pendiente de enriquecimiento IA.')}
         </div>
         ${evidenciaFinding(finding) ? `<pre class="finding-evidence">${escaparHtml(evidenciaFinding(finding))}</pre>` : ''}
       `}
@@ -907,7 +1100,7 @@ function renderListaPriorizada(findings = []) {
         ${renderGrupoHallazgos('Vulnerabilidades confirmadas', 'fa-triangle-exclamation', grupos.confirmadas, true)}
         ${renderGrupoHallazgos('Posibles vulnerabilidades', 'fa-bug', grupos.posibles, true)}
         ${grupos.gfCandidates.length ? renderNotaGf() : ''}
-        ${renderGrupoHallazgos('Candidatos priorizados por GF', 'fa-crosshairs', grupos.gfCandidates, grupos.gfCandidates.length > 0)}
+        ${renderGrupoHallazgos('Candidatos priorizados por GF', 'fa-crosshairs', grupos.gfCandidates, true)}
         ${renderGrupoHallazgos('Superficie expuesta', 'fa-eye', grupos.superficie)}
         ${renderGrupoHallazgos('Hardening / Configuracion', 'fa-shield-halved', grupos.hardening)}
         ${renderGrupoHallazgos('Informativo', 'fa-circle-info', grupos.info)}
@@ -937,9 +1130,10 @@ function exportarFindingsVisiblesCSV() {
   ];
   const visibles = aplicarFiltros(deduplicarFindingsPriorizados(allFindings));
   const rows = [
-    ['Severidad', 'Titulo', 'URL', 'Impacto', 'Solucion'],
+    ['Severidad', 'Probabilidad real', 'Titulo', 'URL', 'Impacto', 'Solucion'],
     ...visibles.map(finding => [
       getFinalSeverity(finding),
+      probabilityText(finding),
       finding.title || '',
       finding.affected_url || finding.affected_asset || '',
       buildImpactText(finding) || finding.description || '',
@@ -991,21 +1185,33 @@ function canonicalToolName(tool = '') {
   return names[lower] || lower;
 }
 
-function buildSeverityCounts(grupos = {}) {
+function buildSeverityCountsFromFindings(findings = []) {
   const counts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
-  [
-    ...(grupos.confirmadas || []),
-    ...(grupos.posibles || []),
-    ...(grupos.gfCandidates || []),
-    ...(grupos.hardening || []),
-    ...(grupos.superficie || []),
-    ...(grupos.reconocimiento || []),
-    ...(grupos.descartados || [])
-  ].forEach(finding => {
+  findings.forEach(finding => {
     const severity = getFinalSeverity(finding);
     if (counts[severity] !== undefined) counts[severity] += 1;
   });
   return counts;
+}
+
+function getReportableSeverityCounts(findings = []) {
+  return buildSeverityCountsFromFindings(
+    findings.filter(finding => ['confirmed', 'possible'].includes(getFinalStatus(finding)))
+  );
+}
+
+function getTechnicalSeverityCounts(findings = []) {
+  return buildSeverityCountsFromFindings(
+    findings.filter(finding => getFinalStatus(finding) !== 'discarded')
+  );
+}
+
+function getStatusCounts(findings = []) {
+  return findings.reduce((acc, finding) => {
+    const status = getFinalStatus(finding);
+    acc[status] = (acc[status] || 0) + 1;
+    return acc;
+  }, { confirmed: 0, possible: 0, candidate: 0, hardening: 0, surface: 0, informational: 0, discarded: 0 });
 }
 
 function buildToolCounts(data = {}, findings = []) {
@@ -1146,15 +1352,19 @@ function renderDashboard(data = {}, grupos = {}, findings = []) {
   const grade = data.risk_grade || 'N/D';
   const scoreText = score === null || score === undefined ? 'N/D' : `${score}/100`;
   const scorePercent = score === null || score === undefined ? 0 : clampPercent(score);
-  const severityCounts = buildSeverityCounts(grupos);
+  const technicalSeverityCounts = getTechnicalSeverityCounts(findings);
+  const statusCounts = getStatusCounts(findings);
   const toolCounts = buildToolCounts(data, findings);
+  const riskBreakdown = data.risk_score_breakdown || data.riskScoreBreakdown || {};
+  const riskExplanation = riskBreakdown.explanation ||
+    'El score prioriza vulnerabilidades confirmadas y evidencia de explotacion. GF, hardening y superficie tienen peso limitado.';
 
   return `
     <section class="security-dashboard">
       <div class="dashboard-head">
         <div>
           <h2>Resumen visual del analisis</h2>
-          <p>Riesgo, severidades y hallazgos por herramienta sin mezclarlo con la lista tecnica.</p>
+          <p>Riesgo, distribucion tecnica y hallazgos por herramienta sin mezclarlo con la lista tecnica.</p>
         </div>
         <span class="terminal-badge status-ok">[ LIVE REPORT ]</span>
       </div>
@@ -1169,13 +1379,16 @@ function renderDashboard(data = {}, grupos = {}, findings = []) {
             <i style="width:${escaparHtml(scorePercent)}%"></i>
           </div>
           <div class="risk-scale"><span>0</span><span>25</span><span>50</span><span>75</span><span>100</span></div>
+          <p class="terminal-subtle">${escaparHtml(riskExplanation)}</p>
         </article>
         <article class="terminal-card chart-card">
           <div class="group-header">
-            <h2>SEVERIDAD GLOBAL</h2>
-            <span>${escaparHtml(Object.values(severityCounts).reduce((sum, value) => sum + value, 0))}</span>
+            <h2>DISTRIBUCION TECNICA TOTAL</h2>
+            <span>${escaparHtml(Object.values(technicalSeverityCounts).reduce((sum, value) => sum + value, 0))}</span>
           </div>
-          ${renderSeverityChart(severityCounts)}
+          <p class="terminal-subtle">Incluye candidatos, hardening y superficie; no todo es explotable.</p>
+          ${renderSeverityChart(technicalSeverityCounts)}
+          <p class="terminal-subtle">Confirmadas: ${escaparHtml(statusCounts.confirmed)} · Posibles: ${escaparHtml(statusCounts.possible)} · GF: ${escaparHtml(statusCounts.candidate)} · Hardening: ${escaparHtml(statusCounts.hardening)} · Superficie: ${escaparHtml(statusCounts.surface)}</p>
         </article>
         <article class="terminal-card chart-card">
           <div class="group-header">
@@ -1194,6 +1407,7 @@ function renderScore(data = {}) {
   const level = data.risk_level || 'N/D';
   const grade = data.risk_grade || 'N/D';
   const scoreText = score === null || score === undefined ? 'N/D' : `${score}/100`;
+  const riskBreakdown = data.risk_score_breakdown || data.riskScoreBreakdown || {};
   return `
     <section class="terminal-card risk-score-card">
       <div class="group-header">
@@ -1202,7 +1416,9 @@ function renderScore(data = {}) {
       </div>
       <div class="risk-score-value">${escaparHtml(scoreText)} <span>[${escaparHtml(String(level).toUpperCase())}]</span></div>
       <div class="risk-bar">${escaparHtml(barraAsciiRiesgo(score))}</div>
-      <p class="terminal-subtle">risk_score usa riesgo acumulado: 0 es bajo, 100 es critico.</p>
+      <p class="terminal-subtle">Fuente: ${data.finalScoreSource === 'ai_global_review' ? 'revision IA global sobre todos los hallazgos enriquecidos' : 'pendiente de revision IA global'}.</p>
+      <p class="terminal-subtle">${escaparHtml(riskBreakdown.explanation || 'El score prioriza evidencia confirmada; candidatos, hardening y superficie tienen peso limitado.')}</p>
+      ${(data.aiFinalScoreReason || riskBreakdown.aiFinalScoreReason) ? `<p class="terminal-subtle">Motivo IA: ${escaparHtml(data.aiFinalScoreReason || riskBreakdown.aiFinalScoreReason)}</p>` : ''}
     </section>
   `;
 }
@@ -1711,6 +1927,14 @@ btnGenerarInforme.addEventListener('click', async () => {
         risk_score: ultimoAnalisis.risk_score,
         risk_level: ultimoAnalisis.risk_level,
         risk_grade: ultimoAnalisis.risk_grade,
+        risk_score_breakdown: ultimoAnalisis.risk_score_breakdown || ultimoAnalisis.riskScoreBreakdown,
+        deterministicScoreBeforeAI: ultimoAnalisis.deterministicScoreBeforeAI,
+        aiFinalScore100: ultimoAnalisis.aiFinalScore100,
+        finalScoreSource: ultimoAnalisis.finalScoreSource,
+        aiFinalScoreReason: ultimoAnalisis.aiFinalScoreReason,
+        aiFinalRiskLevel: ultimoAnalisis.aiFinalRiskLevel,
+        aiFinalScoreStatus: ultimoAnalisis.aiFinalScoreStatus,
+        ai_stats: ultimoAnalisis.ai_stats || ultimoAnalisis.ai_personalization_stats,
         sqlmap_notice: ultimoAnalisis.sqlmap_notice,
         ai_notice: ultimoAnalisis.ai_notice
       })

@@ -4,6 +4,7 @@ const {
   buildImpactText,
   canonicalToolName,
   getFinalSeverity,
+  getFinalStatus,
   normalizeSeverity,
   percentage,
   safeArray,
@@ -92,6 +93,7 @@ function scoreLabel(score, level) {
   const normalized = String(level || '').toLowerCase();
   if (normalized === 'critico') return 'Riesgo Critico';
   if (normalized === 'alto') return 'Riesgo Alto';
+  if (normalized === 'alto moderado') return 'Riesgo Alto moderado';
   if (normalized === 'medio' || normalized === 'moderado') return 'Riesgo Medio';
   if (normalized === 'bajo') return 'Riesgo Bajo';
   return `Riesgo ${text(level, 'N/D')}`;
@@ -129,16 +131,13 @@ function deriveMetrics(groups, context) {
     Number(counter(context, 'trufflehog.secretos_posibles'));
 
   return [
-    metric('Critical', groups.severityReportable.critical, 'critical'),
-    metric('High', groups.severityReportable.high, 'high'),
-    metric('Medium', groups.severityReportable.medium, 'medium'),
-    metric('Low', groups.severityReportable.low, 'low'),
-    metric('Info', groups.severityReportable.info, 'info'),
     metric('Confirmadas', groups.confirmed.length, 'critical'),
     metric('Posibles', groups.possible.length, 'medium'),
     metric('Candidatos GF', groups.gfCandidates.length, 'info'),
     metric('Hardening', groups.hardening.length, 'low'),
     metric('Superficie', groups.attackSurface.length, 'info'),
+    metric('Info', groups.informational.length, 'info'),
+    metric('Descartados', groups.discarded.length, 'info'),
     metric('Endpoints', Math.max(counter(context, 'katana.endpoints_encontrados'), counter(context, 'gau.endpoints_encontrados')), 'info'),
     metric('Subdominios', counter(context, 'subfinder.subdominios_encontrados'), 'info'),
     metric('Activos vivos', counter(context, 'httpx.activos_vivos'), 'low'),
@@ -301,17 +300,75 @@ function interestingSurface(groups, context = {}) {
   return sortFindings(fromFindings).slice(0, 45);
 }
 
+function probabilityDisplay(finding = {}) {
+  const explicitStatus = String(finding.finalStatus || finding.technicalStatus || finding.status || '').toLowerCase();
+  if (['hardening', 'surface', 'informational'].includes(explicitStatus) || finding.probabilityLabel === 'no_aplica') return 'N/A';
+  const values = [finding.realVulnerabilityProbabilityPercent, finding.probabilityFinal, finding.finalProbability, finding.probabilityAISuggested];
+  for (const value of values) {
+    if (value === null || value === undefined || value === '') continue;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) continue;
+    const percent = Math.round(Math.max(0, Math.min(100, parsed <= 1 ? parsed * 100 : parsed)));
+    return `${percent}%`;
+  }
+  return 'N/D';
+}
+
+function displayTool(finding = {}) {
+  if (finding.displayTool) return finding.displayTool;
+  if (Array.isArray(finding.sourceTools) && finding.sourceTools.length > 1) {
+    return finding.sourceTools.map(tool => String(tool || '').replace(/^./, char => char.toUpperCase())).join('/');
+  }
+  const raw = finding.sourceTool || finding.tool || finding.source || 'tool';
+  const key = String(raw).split(':')[0].toLowerCase();
+  return { gf: 'GF', gau: 'Gau', katana: 'Katana', feroxbuster: 'Feroxbuster', dalfox: 'Dalfox', sqlmap: 'SQLMap', tls: 'TLS' }[key] || raw;
+}
+
+function findingIdentity(finding = {}) {
+  return finding.id ||
+    finding.fingerprint ||
+    `${finding.tool || ''}|${finding.title || ''}|${finding.affected_url || finding.affected_asset || ''}`;
+}
+
+function getRemediationSectionTitle(findings = []) {
+  const normalized = safeArray(findings);
+  const hasConfirmedCritical = normalized.some(finding =>
+    getFinalStatus(finding) === 'confirmed' && getFinalSeverity(finding) === 'critical'
+  );
+  const hasConfirmedHigh = normalized.some(finding =>
+    getFinalStatus(finding) === 'confirmed' && getFinalSeverity(finding) === 'high'
+  );
+
+  if (hasConfirmedCritical) return 'Acciones criticas inmediatas';
+  if (hasConfirmedHigh) return 'Acciones de alta prioridad';
+  return 'Acciones prioritarias';
+}
+
 function buildRecommendations(groups) {
-  const critical = groups.confirmed.filter(f => ['critical', 'high'].includes(getFinalSeverity(f)));
+  const reportable = [...groups.confirmed, ...groups.possible];
+  const confirmedCritical = groups.confirmed.filter(f => getFinalSeverity(f) === 'critical');
+  const confirmedHigh = groups.confirmed.filter(f => getFinalSeverity(f) === 'high');
+  const primaryFindings = confirmedCritical.length
+    ? confirmedCritical
+    : confirmedHigh.length
+      ? confirmedHigh
+      : reportable.filter(f => ['medium', 'high', 'critical'].includes(getFinalSeverity(f)));
+  const primaryIds = new Set(primaryFindings.map(findingIdentity));
   const shortTerm = [...groups.confirmed, ...groups.possible]
-    .filter(f => ['medium', 'high', 'critical'].includes(getFinalSeverity(f)));
+    .filter(f => ['medium', 'high', 'critical'].includes(getFinalSeverity(f)) && !primaryIds.has(findingIdentity(f)));
   const manual = [...groups.possible, ...groups.gfCandidates]
     .filter(f => isGfCandidate(f) || String(f.confidence || '').toLowerCase() === 'medium' || f.requiresManualValidation);
+  const primaryTitle = getRemediationSectionTitle(reportable);
 
   return {
-    critical: critical.length
-      ? critical.map(f => `${f.title}: ${f.recommendation || 'Corregir con prioridad y verificar explotabilidad tras el cambio.'}`)
-      : ['No hay acciones criticas inmediatas basadas en vulnerabilidades confirmadas.'],
+    primaryTitle,
+    primarySeverity: confirmedCritical.length ? 'critical' : confirmedHigh.length ? 'high' : 'medium',
+    primary: primaryFindings.length
+      ? primaryFindings.slice(0, 12).map(f => `${f.title}: ${f.recommendation || 'Corregir con prioridad y verificar explotabilidad tras el cambio.'}`)
+      : ['No hay acciones prioritarias basadas en vulnerabilidades confirmadas o posibles.'],
+    critical: primaryFindings.length
+      ? primaryFindings.slice(0, 12).map(f => `${f.title}: ${f.recommendation || 'Corregir con prioridad y verificar explotabilidad tras el cambio.'}`)
+      : ['No hay acciones prioritarias basadas en vulnerabilidades confirmadas o posibles.'],
     shortTerm: shortTerm.length
       ? shortTerm.slice(0, 12).map(f => `${f.title}: ${f.recommendation || 'Validar el hallazgo y aplicar la remediacion tecnica correspondiente.'}`)
       : ['No hay vulnerabilidades reportables de corto plazo con la evidencia actual.'],
@@ -439,7 +496,12 @@ function prepareReportData(target, findings = [], context = {}) {
       score: context.risk_score,
       level: context.risk_level || 'N/D',
       grade: context.risk_grade || 'N/D',
-      label: scoreLabel(context.risk_score, context.risk_level)
+      label: scoreLabel(context.risk_score, context.risk_level),
+      breakdown: context.risk_score_breakdown || context.riskScoreBreakdown || null,
+      source: context.finalScoreSource || 'pending_ai_global_review',
+      reason: context.aiFinalScoreReason || '',
+      aiLevel: context.aiFinalRiskLevel || null,
+      deterministicScoreBeforeAI: context.deterministicScoreBeforeAI ?? null
     },
     groups,
     metrics: deriveMetrics(groups, context),
@@ -453,6 +515,7 @@ function prepareReportData(target, findings = [], context = {}) {
     gfCandidates: context.gfCandidates || context.gf_candidates || {},
     interestingSurface: interestingSurface(groups, context),
     recommendations: buildRecommendations(groups),
+    aiStats: context.aiStats || context.ai_stats || {},
     allFindings: normalizedFindings,
     notices: [context.sqlmap_notice, context.ai_notice].filter(Boolean),
     limitations: analysisLimitations({ ...context, toolResults, toolCounters })
@@ -463,10 +526,14 @@ module.exports = {
   SEVERITY_ORDER,
   getAsset,
   getFinalSeverity,
+  getFinalStatus,
   buildImpactText,
+  displayTool,
+  getRemediationSectionTitle,
   isGfCandidate,
   normalizeSeverity,
   percentage,
+  probabilityDisplay,
   prepareReportData,
   safeArray,
   text,

@@ -209,7 +209,13 @@ function findingsDalfox(toolResult, target) {
         ? `Dalfox confirmo XSS en el parametro ${param || 'identificado'}.`
         : `Dalfox detecto indicios de XSS en el parametro ${param || 'identificado'} que requieren validacion.`,
       severity,
+      baseSeverity: confirmed ? 'high' : severity,
+      finalSeverity: severity,
+      technicalStatus: confirmed ? 'confirmed' : 'possible',
+      finalStatus: confirmed ? 'confirmed' : 'possible',
       confidence: confirmed ? 'high' : 'medium',
+      evidenceStrength: confirmed ? 'strong' : 'medium',
+      category: confirmed ? 'exploitable' : 'validation_required',
       cvss: null,
       cwe: parsed.cwe || 'CWE-79',
       affected_asset: target,
@@ -353,44 +359,83 @@ function tituloSuperficie(clave, swaggerJson = false) {
   return 'Superficie sensible descubierta';
 }
 
+function sqlmapTieneExtraccion(item = {}) {
+  const texto = [
+    item.evidencia,
+    item.payload,
+    item.dbms,
+    ...(item.resumen || [])
+  ].filter(Boolean).join(' ').toLowerCase();
+
+  return /extraccion|extracci[oó]n|dump|datos|bypass|escritura|write|database/.test(texto);
+}
+
+function sqlmapTieneEvidenciaFuerte(item = {}) {
+  return Boolean(item.payload || item.dbms || sqlmapTieneExtraccion(item));
+}
+
 function findingsSqlmap(toolResult, target) {
   const items = Array.isArray(toolResult.parsed) ? toolResult.parsed : [];
 
   return normalizarFindings(
     items
       .filter(item => ['confirmed_sqli', 'possible_sqli'].includes(item.status))
-      .map((item, index) => ({
-        id: `sqlmap-sqli-${index + 1}`,
-        tool: 'sqlmap',
-        type: 'vulnerability',
-        title: item.status === 'confirmed_sqli'
-          ? 'SQL Injection confirmada por sqlmap'
-          : 'Posible SQL Injection detectada por sqlmap',
-        description: item.status === 'confirmed_sqli'
-          ? 'Sqlmap ha identificado un punto de inyeccion SQL confirmado.'
-          : 'Sqlmap ha identificado indicios de inyeccion SQL que requieren validacion manual.',
-        severity: item.status === 'confirmed_sqli' ? 'critical' : 'high',
-        confidence: item.status === 'confirmed_sqli' ? 'high' : 'medium',
-        cvss: null,
-        cwe: 'CWE-89',
-        affected_asset: target,
-        affected_url: item.url,
-        evidence: [
-          item.evidencia,
-          item.parametro ? `Parametro: ${item.parametro}` : null,
-          item.payload ? `Payload: ${item.payload}` : null,
-          item.dbms ? `DBMS: ${item.dbms}` : null,
-          ...(item.resumen || [])
-        ].filter(Boolean).join('\n'),
-        impact: '',
-        recommendation: '',
-        false_positive_risk: item.status === 'confirmed_sqli' ? 'low' : 'medium',
-        status: item.status,
-        parametro: item.parametro || null,
-        payload: item.payload || null,
-        dbms: item.dbms || null,
-        raw_reference: JSON.stringify(item).slice(0, 1200)
-      })),
+      .map((item, index) => {
+        const confirmed = item.status === 'confirmed_sqli';
+        const extraction = sqlmapTieneExtraccion(item);
+        const strongEvidence = sqlmapTieneEvidenciaFuerte(item);
+        const severity = confirmed
+          ? (extraction ? 'critical' : 'high')
+          : 'high';
+        const confidence = confirmed ? 'high' : (strongEvidence ? 'medium' : 'low');
+        const evidenceStrength = confirmed ? 'strong' : (strongEvidence ? 'medium' : 'weak');
+
+        return {
+          id: `sqlmap-sqli-${index + 1}`,
+          tool: 'sqlmap',
+          type: confirmed ? 'confirmed_vulnerability' : 'possible_vulnerability',
+          title: confirmed
+            ? 'SQL Injection confirmada por sqlmap'
+            : 'Posible SQL Injection detectada por sqlmap',
+          description: confirmed
+            ? 'Sqlmap ha identificado un punto de inyeccion SQL confirmado.'
+            : 'Sqlmap ha identificado indicios de inyeccion SQL que requieren validacion manual.',
+          severity,
+          baseSeverity: severity,
+          potentialSeverity: severity,
+          finalSeverity: severity,
+          technicalStatus: confirmed ? 'confirmed' : 'possible',
+          finalStatus: confirmed ? 'confirmed' : 'possible',
+          confidence,
+          evidenceStrength,
+          category: 'exploitable',
+          cvss: null,
+          cwe: 'CWE-89',
+          affected_asset: target,
+          affected_url: item.url,
+          evidence: [
+            item.evidencia,
+            item.parametro ? `Parametro: ${item.parametro}` : null,
+            item.payload ? `Payload: ${item.payload}` : null,
+            item.dbms ? `DBMS: ${item.dbms}` : null,
+            ...(item.resumen || [])
+          ].filter(Boolean).join('\n') || 'SQLMap devolvio estado possible_sqli sin evidencia tecnica concluyente.',
+          impact: confirmed
+            ? 'Una inyeccion SQL confirmada puede permitir consultas no autorizadas sobre la base de datos afectada.'
+            : 'El endpoint presenta indicios compatibles con SQL Injection, pero la evidencia es incompleta y requiere validacion manual.',
+          recommendation: 'Usar consultas parametrizadas u ORM seguro, validar entradas y revisar permisos de la cuenta de base de datos.',
+          false_positive_risk: confirmed ? 'low' : 'medium',
+          status: item.status,
+          source_status: item.status,
+          parametro: item.parametro || null,
+          payload: item.payload || null,
+          dbms: item.dbms || null,
+          requiresManualValidation: !confirmed,
+          isVulnerability: true,
+          reportable: true,
+          raw_reference: JSON.stringify(item).slice(0, 1200)
+        };
+      }),
     'sqlmap',
     target
   );
@@ -415,6 +460,16 @@ function extraerFindingsDeterministas(tool, toolResult, target) {
 }
 
 function findingBase({ id, tool, type, title, description, severity, confidence, affected_url, affected_asset, evidence, impact, recommendation, isVulnerability, false_positive_risk = 'medium', extra = {} }) {
+  const technicalStatus = extra.technicalStatus || extra.technical_status ||
+    (type === 'missing_security_header' || type === 'insecure_cookie' || type === 'missing_https_redirect' || type === 'tls_certificate_issue'
+      ? 'hardening'
+      : type === 'surface' || type === 'exposed_port'
+        ? 'surface'
+        : isVulnerability ? 'possible' : 'informational');
+  const finalStatus = extra.finalStatus || extra.final_status || technicalStatus;
+  const baseSeverity = extra.baseSeverity || extra.base_severity || severity;
+  const finalSeverity = extra.finalSeverity || extra.final_severity || severity;
+
   return {
     id,
     tool,
@@ -422,13 +477,21 @@ function findingBase({ id, tool, type, title, description, severity, confidence,
     title,
     description,
     severity,
+    baseSeverity,
+    finalSeverity,
+    technicalStatus,
+    finalStatus,
     confidence,
     affected_asset,
+    affectedAsset: affected_asset,
     affected_url,
+    endpoint: affected_url || null,
     evidence,
+    evidenceStrength: extra.evidenceStrength || extra.evidence_strength || 'medium',
     impact,
     recommendation,
     isVulnerability,
+    reportable: extra.reportable !== undefined ? extra.reportable : true,
     isFalsePositiveLikely: false,
     false_positive_risk,
     ...extra
@@ -457,7 +520,7 @@ function datosHeader(name) {
     },
     'x-content-type-options': {
       title: 'X-Content-Type-Options ausente',
-      severity: 'medium',
+      severity: 'low',
       impact: 'Puede permitir MIME sniffing en navegadores y ampliar algunos vectores de carga de contenido.',
       recommendation: 'Configurar X-Content-Type-Options: nosniff.'
     },
@@ -488,6 +551,7 @@ function findingsHeaders(toolResult, target) {
   const findings = [];
 
   items.forEach(item => {
+    if (!item.statusCode) return;
     (item.missing || []).forEach(header => {
       const datos = datosHeader(header);
       findings.push(findingBase({
@@ -500,12 +564,19 @@ function findingsHeaders(toolResult, target) {
         confidence: 'medium',
         affected_asset: target,
         affected_url: item.url,
-        evidence: `URL: ${item.url}\nStatus: ${item.statusCode}\nCabecera ausente: ${header}`,
+        evidence: `Status ${item.statusCode}. Cabecera ${header} ausente en ${item.url}.`,
         impact: datos.impact,
         recommendation: datos.recommendation,
-        isVulnerability: true,
+        isVulnerability: false,
         false_positive_risk: 'medium',
-        extra: { header }
+        extra: {
+          header,
+          technicalStatus: 'hardening',
+          finalStatus: 'hardening',
+          category: 'defensive_configuration',
+          evidenceStrength: 'medium',
+          reportable: true
+        }
       }));
     });
 
@@ -525,7 +596,14 @@ function findingsHeaders(toolResult, target) {
         recommendation: 'Reducir banners si no son necesarios y mantener componentes actualizados.',
         isVulnerability: false,
         false_positive_risk: 'low',
-        extra: { header: banner.name }
+        extra: {
+          header: banner.name,
+          technicalStatus: 'informational',
+          finalStatus: 'informational',
+          category: 'informational',
+          evidenceStrength: 'weak',
+          reportable: true
+        }
       }));
     });
   });
@@ -590,12 +668,20 @@ function findingsCookies(toolResult, target) {
           cookie.path ? `Path: ${cookie.path}` : null
         ].filter(Boolean).join('\n'),
         impact: cookie.isSessionCookie
-          ? 'Puede aumentar el riesgo de robo, exposicion o envio indebido de cookies de sesion.'
+          ? 'La ausencia de flags defensivos puede aumentar la exposicion de la cookie de sesion en determinados flujos.'
           : 'Riesgo limitado salvo que la cookie contenga datos sensibles.',
         recommendation: 'Configurar cookies de sesion con Secure, HttpOnly y SameSite=Lax/Strict segun el flujo de la aplicacion.',
-        isVulnerability: true,
+        isVulnerability: false,
         false_positive_risk: cookie.isSessionCookie ? 'medium' : 'high',
-        extra: { cookieName: cookie.name, missingFlags: flags }
+        extra: {
+          cookieName: cookie.name,
+          missingFlags: flags,
+          technicalStatus: 'hardening',
+          finalStatus: 'hardening',
+          category: 'defensive_configuration',
+          evidenceStrength: 'medium',
+          reportable: true
+        }
       }));
     });
   });
@@ -606,9 +692,9 @@ function findingsCookies(toolResult, target) {
 function findingsHttpsRedirect(toolResult, target) {
   const items = Array.isArray(toolResult.parsed) ? toolResult.parsed : [];
 
-  return normalizarFindings(items.map((item, index) => {
-    if (item.httpAccessibleWithoutRedirect) {
-      return findingBase({
+  return normalizarFindings(items
+    .filter(item => item.httpAccessibleWithoutRedirect && item.statusCode)
+    .map((item, index) => findingBase({
         id: `https-redirect-missing-${index + 1}`,
         tool: 'httpsRedirect',
         type: 'missing_https_redirect',
@@ -618,29 +704,18 @@ function findingsHttpsRedirect(toolResult, target) {
         confidence: 'medium',
         affected_asset: target,
         affected_url: item.url,
-        evidence: `Status HTTP: ${item.statusCode}\nLocation: ${item.location || 'ausente'}`,
-        impact: 'Usuarios o enlaces HTTP pueden quedar expuestos a trafico sin cifrar o downgrade.',
+        evidence: `HTTP responde con status ${item.statusCode} sin Location hacia HTTPS.`,
+        impact: 'El sitio permite acceso por HTTP sin forzar el canal cifrado.',
         recommendation: 'Redirigir todo HTTP a HTTPS con 301/308 y mantener HSTS en HTTPS.',
-        isVulnerability: true
-      });
-    }
-
-    return findingBase({
-      id: `https-redirect-ok-${index + 1}`,
-      tool: 'httpsRedirect',
-      type: 'reconocimiento',
-      title: item.redirectsToHttps ? 'HTTP redirige correctamente a HTTPS' : 'HTTP no disponible o sin evidencia negativa',
-      description: 'Resultado informativo de comprobacion HTTP a HTTPS.',
-      severity: 'info',
-      confidence: 'low',
-      affected_asset: target,
-      affected_url: item.url,
-      evidence: `Status HTTP: ${item.statusCode}\nLocation: ${item.location || 'ausente'}`,
-      impact: '',
-      recommendation: '',
-      isVulnerability: false
-    });
-  }), 'httpsRedirect', target);
+        isVulnerability: false,
+        extra: {
+          technicalStatus: 'hardening',
+          finalStatus: 'hardening',
+          category: 'defensive_configuration',
+          evidenceStrength: 'medium',
+          reportable: true
+        }
+      })), 'httpsRedirect', target);
 }
 
 function findingsTls(toolResult, target) {
@@ -648,37 +723,22 @@ function findingsTls(toolResult, target) {
   const findings = [];
 
   items.forEach((item, index) => {
-    if (item.tlsError) {
-      findings.push(findingBase({
-        id: `tls-error-${index + 1}`,
-        tool: 'tls',
-        type: 'tls_certificate_issue',
-        title: 'Error TLS al conectar',
-        description: 'No se pudo completar correctamente la conexion TLS.',
-        severity: 'medium',
-        confidence: 'medium',
-        affected_asset: item.host || target,
-        affected_url: item.host ? `https://${item.host}` : null,
-        evidence: item.error || 'Error TLS',
-        impact: 'Puede impedir conexiones seguras o indicar configuracion TLS defectuosa.',
-        recommendation: 'Revisar certificado, cadena de confianza, SNI y configuracion TLS.',
-        isVulnerability: true
-      }));
-      return;
-    }
+    if (item.tlsError || item.error || !item.validTo) return;
 
     if (item.expired || item.nearExpiry || item.authorizationError) {
+      const days = typeof item.daysRemaining === 'number' ? item.daysRemaining : null;
+      const nearSeverity = days !== null && days <= 7 ? 'medium' : 'low';
       findings.push(findingBase({
         id: `tls-cert-${index + 1}`,
         tool: 'tls',
         type: 'tls_certificate_issue',
         title: item.expired
-          ? 'Certificado TLS expirado'
-          : item.nearExpiry
-            ? 'Certificado TLS proximo a expirar'
-            : 'Certificado TLS con error de validacion',
+            ? 'Certificado TLS expirado'
+            : item.nearExpiry
+              ? 'Certificado TLS proximo a expirar'
+              : 'Certificado TLS con error de validacion',
         description: 'Se detecto un problema de validez o confianza del certificado TLS.',
-        severity: item.expired ? 'high' : item.nearExpiry ? 'low' : 'medium',
+        severity: item.expired ? 'high' : item.nearExpiry ? nearSeverity : 'medium',
         confidence: item.expired || item.authorizationError ? 'high' : 'medium',
         affected_asset: item.host || target,
         affected_url: item.host ? `https://${item.host}` : null,
@@ -689,28 +749,20 @@ function findingsTls(toolResult, target) {
           item.authorizationError ? `Error: ${item.authorizationError}` : null,
           item.issuer ? `Issuer: ${JSON.stringify(item.issuer)}` : null
         ].filter(Boolean).join('\n'),
-        impact: 'Puede degradar la confianza del usuario o romper conexiones seguras.',
+        impact: item.nearExpiry
+          ? 'La caducidad proxima puede provocar errores de confianza o interrupciones si no se renueva a tiempo.'
+          : 'Puede degradar la confianza del usuario o romper conexiones seguras.',
         recommendation: 'Renovar el certificado y corregir la cadena de confianza antes de la expiracion.',
-        isVulnerability: true
+        isVulnerability: false,
+        extra: {
+          technicalStatus: 'hardening',
+          finalStatus: 'hardening',
+          category: 'defensive_configuration',
+          evidenceStrength: 'medium',
+          reportable: true
+        }
       }));
-      return;
     }
-
-    findings.push(findingBase({
-      id: `tls-info-${index + 1}`,
-      tool: 'tls',
-      type: 'reconocimiento',
-      title: 'Certificado TLS valido',
-      description: 'Informacion basica del certificado TLS observado.',
-      severity: 'info',
-      confidence: 'low',
-      affected_asset: item.host || target,
-      affected_url: item.host ? `https://${item.host}` : null,
-      evidence: `Valido hasta: ${item.validTo || 'desconocido'}\nProtocolo: ${item.protocol || 'desconocido'}\nCipher: ${item.cipher || 'desconocido'}`,
-      impact: '',
-      recommendation: '',
-      isVulnerability: false
-    }));
   });
 
   return normalizarFindings(findings, 'tls', target);
@@ -773,16 +825,23 @@ function findingsPorts(toolResult, target) {
         type: 'exposed_port',
         title: `Puerto de datos expuesto: ${item.port}`,
         description: 'Se detecto un puerto comun de base de datos/cache accesible por TCP.',
-        severity: item.port === 6379 || item.port === 27017 ? 'critical' : 'high',
-        confidence: 'high',
+        severity: 'high',
+        confidence: 'medium',
         affected_asset: item.host || target,
         affected_url: `${item.host || target}:${item.port}`,
         evidence: `Puerto ${item.port}/tcp abierto${item.service ? ` (${item.service})` : ''}. Fuente: ${item.source}`,
-        impact: 'Un servicio de datos expuesto puede permitir acceso no autorizado si no esta protegido por red y autenticacion fuerte.',
+        impact: 'Un servicio de datos expuesto amplia de forma relevante la superficie de ataque y debe revisarse con prioridad.',
         recommendation: 'Restringir por firewall/VPC, exigir autenticacion fuerte y no exponer bases de datos/cache a Internet.',
-        isVulnerability: true,
+        isVulnerability: false,
         false_positive_risk: 'medium',
-        extra: { port: item.port }
+        extra: {
+          port: item.port,
+          technicalStatus: 'surface',
+          finalStatus: 'surface',
+          category: 'attack_surface',
+          evidenceStrength: 'medium',
+          reportable: true
+        }
       });
     }
 
@@ -801,7 +860,14 @@ function findingsPorts(toolResult, target) {
       recommendation: 'Validar si el servicio debe estar expuesto y aplicar filtrado de red cuando no sea necesario.',
       isVulnerability: false,
       false_positive_risk: 'medium',
-      extra: { port: item.port }
+      extra: {
+        port: item.port,
+        technicalStatus: 'surface',
+        finalStatus: 'surface',
+        category: 'attack_surface',
+        evidenceStrength: item.category === 'web-alt' ? 'medium' : 'weak',
+        reportable: item.category === 'web-alt'
+      }
     });
   }), 'ports', target);
 }
@@ -817,7 +883,7 @@ function findingsGau(toolResult, target) {
     if (!url || vistos.has(key)) return;
     vistos.add(key);
 
-    const clasificacion = clasificarEndpointSensible(url);
+    const clasificacion = clasificarEndpointSensible(url, 'gau');
     if (clasificacion || endpoint.hasParams || endpoint.tieneParametros) {
       relevantes.push({
         endpoint,
@@ -831,13 +897,21 @@ function findingsGau(toolResult, target) {
     relevantes.slice(0, 40).map((item, index) => ({
       id: `gau-historical-url-${index + 1}`,
       tool: 'gau',
+      sourceTool: item.endpoint?.sourceTool || 'gau',
+      source: item.endpoint?.source || 'gau',
       type: item.clasificacion ? 'surface' : 'historical-url',
       title: item.clasificacion?.title || 'URL historica parametrizada',
       description: item.clasificacion
         ? `${item.clasificacion.title} encontrada en fuentes historicas.`
         : 'GAU encontro una URL historica con parametros utiles para pruebas dirigidas.',
       severity: 'info',
+      baseSeverity: 'info',
+      finalSeverity: 'info',
+      technicalStatus: item.clasificacion ? 'surface' : 'informational',
+      finalStatus: item.clasificacion ? 'surface' : 'informational',
       confidence: 'low',
+      evidenceStrength: item.clasificacion ? 'medium' : 'weak',
+      category: item.clasificacion ? 'attack_surface' : 'informational',
       isVulnerability: false,
       affected_asset: target,
       affected_url: item.url,
@@ -873,7 +947,9 @@ function tituloGf(tipo) {
 }
 
 function severidadGf(tipo) {
-  if (['sqli', 'rce', 'ssrf'].includes(tipo)) return 'medium';
+  if (tipo === 'rce') return 'critical';
+  if (['sqli', 'ssrf', 'lfi'].includes(tipo)) return 'high';
+  if (['xss', 'redirect'].includes(tipo)) return 'medium';
   return 'low';
 }
 
@@ -893,15 +969,21 @@ function findingsGf(toolResult, target) {
         id: `gf-${tipo}-${findings.length + 1}`,
         tool: 'gf',
         type: 'gf_candidate',
-        category: 'candidate',
+        category: 'validation_required',
         vulnerability_type: tipo,
         title: tituloGf(tipo),
         description: `GF marco esta URL como candidata para pruebas de ${tipo.toUpperCase()}. No confirma explotabilidad.`,
         severity: severidadGf(tipo),
+        baseSeverity: severidadGf(tipo),
+        potentialSeverity: severidadGf(tipo),
+        finalSeverity: severidadGf(tipo),
+        technicalStatus: 'candidate',
+        finalStatus: 'candidate',
         confidence: 'low',
+        evidenceStrength: 'weak',
         isVulnerability: false,
         confirmed: false,
-        reportable: false,
+        reportable: true,
         requiresManualValidation: true,
         affected_asset: target,
         affected_url: url,
@@ -956,7 +1038,13 @@ function findingsFeroxbuster(toolResult, target) {
           ? 'Feroxbuster descubrio una ruta sensible accesible que requiere validacion manual.'
           : 'Feroxbuster descubrio superficie sensible. No es una vulnerabilidad confirmada.',
         severity: esExposicionFerox(endpoint.url, endpoint.status) ? 'medium' : 'low',
+        baseSeverity: esExposicionFerox(endpoint.url, endpoint.status) ? 'medium' : 'low',
+        finalSeverity: esExposicionFerox(endpoint.url, endpoint.status) ? 'medium' : 'low',
+        technicalStatus: esExposicionFerox(endpoint.url, endpoint.status) ? 'possible' : 'surface',
+        finalStatus: esExposicionFerox(endpoint.url, endpoint.status) ? 'possible' : 'surface',
         confidence: esExposicionFerox(endpoint.url, endpoint.status) ? 'medium' : 'low',
+        evidenceStrength: esExposicionFerox(endpoint.url, endpoint.status) ? 'medium' : 'weak',
+        category: esExposicionFerox(endpoint.url, endpoint.status) ? 'validation_required' : 'attack_surface',
         isVulnerability: esExposicionFerox(endpoint.url, endpoint.status),
         affected_asset: target,
         affected_url: endpoint.url,
@@ -986,7 +1074,13 @@ function findingsTrufflehog(toolResult, target) {
       title: item.verified ? 'Secreto verificado detectado' : 'Posible secreto detectado',
       description: item.description || `TruffleHog detecto ${item.detectorName || 'un secreto'}.`,
       severity: item.verified ? 'high' : 'medium',
+      baseSeverity: item.verified ? 'high' : 'medium',
+      finalSeverity: item.verified ? 'high' : 'medium',
+      technicalStatus: item.verified ? 'confirmed' : 'possible',
+      finalStatus: item.verified ? 'confirmed' : 'possible',
       confidence: item.verified ? 'high' : 'medium',
+      evidenceStrength: item.verified ? 'strong' : 'medium',
+      category: item.verified ? 'exploitable' : 'validation_required',
       isVulnerability: true,
       affected_asset: target,
       affected_url: item.source || item.affected_url || null,
@@ -1001,9 +1095,11 @@ function findingsTrufflehog(toolResult, target) {
   );
 }
 
-function clasificarEndpointSensible(url) {
+function clasificarEndpointSensible(url, sourceTool = 'katana') {
   const lower = String(url || '').toLowerCase();
   const path = obtenerPath(url);
+  const displaySource = String(sourceTool || 'katana').toLowerCase() === 'gau' ? 'Gau' :
+    String(sourceTool || '').toLowerCase() === 'feroxbuster' ? 'Feroxbuster' : 'Katana';
 
   if (!url || esAssetEstatico(url)) return null;
   if (esRutaRuidosa(url)) {
@@ -1027,8 +1123,8 @@ function clasificarEndpointSensible(url) {
       severity: 'low',
       category: swaggerJson ? 'swagger-json' : 'suspicious',
       evidence: swaggerJson
-        ? 'Esquema Swagger/OpenAPI descubierto por Katana. Es exposicion informativa, no vulnerabilidad confirmada.'
-        : 'Ruta compatible con Swagger/OpenAPI descubierta por Katana. Es superficie util, no vulnerabilidad confirmada.',
+        ? `Esquema Swagger/OpenAPI descubierto por ${displaySource}. Es exposicion informativa, no vulnerabilidad confirmada.`
+        : `Ruta compatible con Swagger/OpenAPI descubierta por ${displaySource}. Es superficie util, no vulnerabilidad confirmada.`,
       impact: '',
       recommendation: recomendacionSuperficie(clave)
     };
@@ -1049,7 +1145,7 @@ function clasificarEndpointSensible(url) {
       title: tituloSuperficie(palabra),
       severity: 'low',
       category: 'suspicious',
-      evidence: `Ruta con patron sensible "${palabra}" descubierta por Katana. Requiere revision manual, pero no es una vulnerabilidad confirmada.`,
+      evidence: `Ruta con patron sensible "${palabra}" descubierta por ${displaySource}. Requiere revision manual, pero no es una vulnerabilidad confirmada.`,
       impact: '',
       recommendation: recomendacionSuperficie(palabra)
     };
@@ -1073,19 +1169,25 @@ function findingsKatana(toolResult, target) {
     if (!url || vistos.has(key)) return;
     vistos.add(key);
 
-    const clasificacion = clasificarEndpointSensible(url);
+    const clasificacion = clasificarEndpointSensible(url, 'katana');
 
     if (!clasificacion) return;
 
     findings.push({
       id: `katana-surface-${findings.length + 1}`,
       tool: 'katana',
+      sourceTool: 'katana',
       type: 'surface',
       category: clasificacion.category || 'suspicious',
       title: clasificacion.title,
       description: `${clasificacion.title} en ${url}.`,
       severity: clasificacion.severity,
+      baseSeverity: clasificacion.severity,
+      finalSeverity: clasificacion.severity,
+      technicalStatus: 'surface',
+      finalStatus: 'surface',
       confidence: 'low',
+      evidenceStrength: 'medium',
       cvss: null,
       cwe: null,
       affected_asset: target,

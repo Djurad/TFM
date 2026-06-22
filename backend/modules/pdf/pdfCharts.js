@@ -70,10 +70,10 @@ function drawRiskGauge(doc, x, y, width, score) {
   const value = score === null || score === undefined ? null : Math.max(0, Math.min(100, Number(score)));
   const percent = value === null ? 0 : value / 100;
   const gradientStops = [
-    { limit: 20, color: COLORS.low },
-    { limit: 40, color: COLORS.success },
-    { limit: 60, color: COLORS.medium },
-    { limit: 80, color: COLORS.high },
+    { limit: 24, color: COLORS.low },
+    { limit: 49, color: COLORS.success },
+    { limit: 69, color: COLORS.medium },
+    { limit: 89, color: COLORS.high },
     { limit: 100, color: COLORS.critical }
   ];
   const active = gradientStops.find(stop => value !== null && value <= stop.limit) || gradientStops[gradientStops.length - 1];

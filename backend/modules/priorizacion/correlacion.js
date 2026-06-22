@@ -110,6 +110,13 @@ function correlacionarFindings(findings = [], toolResults = {}) {
 
       const csp = headers.find(f => String(f.header || '').toLowerCase() === 'content-security-policy');
       if (csp) {
+        csp.baseSeverity = csp.baseSeverity || csp.severity || 'medium';
+        csp.potentialSeverity = 'medium';
+        csp.finalSeverity = 'medium';
+        csp.severity = 'medium';
+        csp.technicalStatus = 'hardening';
+        csp.finalStatus = 'hardening';
+        csp.category = 'defensive_configuration';
         const correlation = crearRelacion({
           severity: 'medium',
           title: 'XSS confirmado agravado por CSP ausente',

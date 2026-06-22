@@ -4,7 +4,11 @@ const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env'), override: true });
 const { generarPdfAuditoria } = require('./modules/pdf/pdfGenerator');
 const { ejecutarReconocimiento } = require('./modules/reconocimiento/reconocimiento');
-const { enriquecerFindingsIA } = require('./modules/ia/ia');
+const {
+  computeFinalRiskScoreWithAI,
+  enrichAllReportableFindingsWithAI,
+  validateAIEnrichmentCoverage
+} = require('./modules/ia/aiMandatoryPipeline');
 const { normalizarFindings } = require('./modules/procesamiento/normalizacion');
 const { extraerFindingsDeterministas } = require('./modules/procesamiento/extractores');
 const { clasificarFindings } = require('./modules/procesamiento/clasificadorFindings');
@@ -14,9 +18,14 @@ const { crearScanLogger } = require('./scanLogger');
 const {
   buildDashboardMetrics,
   buildFindingGroups,
+  countFindingsByToolStatus,
+  getFinalStatus,
   normalizeFindingsForReporting,
   reconcileFindings
 } = require('./modules/priorizacion/findingGroups');
+const {
+  syncFinalFindingsToToolResults
+} = require('./modules/ia/aiSelection');
 
 const app = express();
 const PORT = 3000;
@@ -44,6 +53,35 @@ function serializarToolResult(result) {
     warning: result.warning || null,
     metrics: result.metrics || {}
   };
+}
+
+function contarFindingsPorHerramienta(toolResults = {}) {
+  return Object.fromEntries(
+    Object.entries(toolResults).map(([tool, result]) => [
+      tool,
+      Array.isArray(result.findings) ? result.findings.length : 0
+    ])
+  );
+}
+
+function logToolFindingsSync(toolResults = {}, scanLogger = null) {
+  const counts = contarFindingsPorHerramienta(toolResults);
+  const resumen = [
+    'headers',
+    'cookies',
+    'httpsRedirect',
+    'tls',
+    'ports',
+    'gf',
+    'dalfox',
+    'sqlmap',
+    'nuclei',
+    'trufflehog'
+  ].map(tool => `${tool} findings=${counts[tool] || 0}`).join(' ');
+
+  console.log(`[TOOL-FINDINGS-SYNC] ${resumen}`);
+  if (scanLogger) scanLogger.variable('toolResultsPostReconcile.findings', counts);
+  return counts;
 }
 
 function agruparFindings(findings = []) {
@@ -267,7 +305,7 @@ function resumenHerramientas(reconocimiento, toolResults, findings) {
     katana: {
       endpoints_encontrados: toolResults.katana?.metrics?.endpoints_normalizados || reconocimiento.endpoints?.length || 0,
       raw_urls: toolResults.katana?.metrics?.raw_urls || 0,
-      superficie_util: toolResults.katana?.metrics?.superficie_util || 0,
+      superficie_util: toolResults.katana?.metrics?.superficie_util || countFindingsByToolStatus(findings, 'katana', 'surface'),
       descartados_ruido: toolResults.katana?.metrics?.descartados_ruido || 0,
       descartados_assets: toolResults.katana?.metrics?.descartados_assets || 0,
       duplicados_descartados: toolResults.katana?.metrics?.duplicados_descartados || 0
@@ -316,22 +354,19 @@ function resumenHerramientas(reconocimiento, toolResults, findings) {
   };
 }
 
-function aplicarFallbackIa(findings = []) {
-  return findings.map(finding => ({
-    ...finding,
-    ai_status: 'failed',
-    ai_error: 'No se pudo conectar con Ollama',
-    impact: finding.impact || 'Requiere revision tecnica para valorar el impacto real con la evidencia disponible.',
-    recommendation: finding.recommendation || 'Revisar el endpoint o recurso indicado y aplicar controles de validacion, autorizacion o exposicion segun corresponda.'
-  }));
-}
-
-function debeAnalizarHallazgoIA(finding = {}) {
-  return finding.type !== 'discarded';
+async function enrichEveryReportableFindingIndividuallyWithAI(target, findings = [], correlations = [], options = {}) {
+  return enrichAllReportableFindingsWithAI(findings, {
+    target,
+    correlations,
+    scanLogger: options.scanLogger || null,
+    enviar: options.enviar
+  });
 }
 
 app.post('/analizar', async (req, res) => {
   try {
+    const totalStart = Date.now();
+    const pipelineTimings = {};
     const enviar = () => {};
     const entrada = req.body.prompt || req.body.target;
 
@@ -341,7 +376,9 @@ app.post('/analizar', async (req, res) => {
       });
     }
 
+    const toolsStart = Date.now();
     const reconocimiento = await ejecutarReconocimiento(entrada.trim());
+    pipelineTimings.toolsDurationMs = Date.now() - toolsStart;
     const toolResults = reconocimiento.tool_results || {};
     const findings = [];
 
@@ -351,12 +388,12 @@ app.post('/analizar', async (req, res) => {
       });
     }
 
+    const normalizationStart = Date.now();
     for (const [tool, result] of Object.entries(toolResults)) {
       const findingsDeterministas = clasificarFindings(
         extraerFindingsDeterministas(tool, result, reconocimiento.target)
       );
       const descartadosInfo = findingsDeterministas.filter(f => !f.isVulnerability || f.type === 'reconocimiento').length;
-      const findingsParaIA = findingsDeterministas.filter(debeAnalizarHallazgoIA);
 
       result.findings = findingsDeterministas;
       result.metrics = {
@@ -364,12 +401,12 @@ app.post('/analizar', async (req, res) => {
         producidos: result.metrics?.producidos ?? (Array.isArray(result.parsed) ? result.parsed.length : 0),
         descartados_info_fingerprinting: descartadosInfo,
         descartados_assets: result.metrics?.descartados_assets ?? findingsDeterministas.filter(f => f.type === 'discarded').length,
-        enviados_ia: result.metrics?.enviados_ia ?? findingsParaIA.length,
-        no_enviados_ia: result.metrics?.no_enviados_ia ?? (findingsDeterministas.length - findingsParaIA.length)
+        enviados_ia: 0,
+        no_enviados_ia: findingsDeterministas.length
       };
 
       if (tool === 'katana') {
-        const superficieUtil = findingsDeterministas.filter(f => f.type === 'surface').length;
+        const superficieUtil = countFindingsByToolStatus(findingsDeterministas, 'katana', 'surface');
         result.metrics.superficie_util = superficieUtil;
         result.metrics.descartados_ruido = Math.max(
           0,
@@ -378,42 +415,35 @@ app.post('/analizar', async (req, res) => {
         result.metrics.enviados_ia = 0;
       }
 
-      console.log(`[pipeline] ${tool}: producidos=${result.metrics.producidos}, descartados_info=${descartadosInfo}, enviados_ia=${findingsParaIA.length}, no_enviados_ia=${result.metrics.no_enviados_ia}`);
-
-      if (findingsParaIA.length > 0) {
-        try {
-          const findingsIA = await enriquecerFindingsIA(
-            reconocimiento.target,
-            tool,
-            findingsParaIA
-          );
-
-          if (findingsIA.length > 0) {
-            const enriquecidos = new Map(clasificarFindings(findingsIA).map(f => [f.id, f]));
-            result.findings = result.findings.map(f => enriquecidos.get(f.id) || f);
-          }
-        } catch (error) {
-          result.error = [
-            result.error,
-            `IA no pudo enriquecer ${tool}: ${error.message}`
-          ].filter(Boolean).join(' | ');
-          result.findings = result.findings.map(f =>
-            findingsParaIA.some(item => item.id === f.id)
-              ? aplicarFallbackIa([f])[0]
-              : f
-          );
-        }
-      }
+      console.log(`[pipeline] ${tool}: producidos=${result.metrics.producidos}, descartados_info=${descartadosInfo}, enviados_ia=0, no_enviados_ia=${result.metrics.no_enviados_ia}`);
 
       result.findings = normalizeFindingsForReporting(result.findings || []);
       findings.push(...(result.findings || []));
     }
+    pipelineTimings.normalizationDurationMs = Date.now() - normalizationStart;
 
+    const correlationStart = Date.now();
     const findingsDeduplicadosBase = deduplicarFindings(findings);
     const correlacion = correlacionarFindings(findingsDeduplicadosBase, toolResults);
     const reconciliacion = reconcileFindings(correlacion.findings);
-    const findingsDeduplicados = reconciliacion.findings;
-    const grupos = reconciliacion.groups;
+    pipelineTimings.correlationDurationMs = Date.now() - correlationStart;
+
+    const aiStart = Date.now();
+    const aiResult = await enrichEveryReportableFindingIndividuallyWithAI(
+      reconocimiento.target,
+      reconciliacion.findings,
+      correlacion.correlations
+    );
+    pipelineTimings.aiSelectionDurationMs = aiResult.stats.selectionDurationMs;
+    pipelineTimings.aiDurationMs = Date.now() - aiStart;
+
+    const finalReconcileStart = Date.now();
+    const reconciliacionFinal = reconcileFindings(aiResult.findings);
+    const findingsDeduplicados = reconciliacionFinal.findings;
+    const grupos = reconciliacionFinal.groups;
+    syncFinalFindingsToToolResults(toolResults, findingsDeduplicados);
+    logToolFindingsSync(toolResults);
+    pipelineTimings.finalReconcileDurationMs = Date.now() - finalReconcileStart;
     const findingsInforme = [
       ...grupos.confirmed,
       ...grupos.possible
@@ -424,8 +454,20 @@ app.post('/analizar', async (req, res) => {
     console.log(`[UI] superficie mostrada: ${summaryUi.superficie}`);
     console.log(`[UI] superficie ocultada por ruido: ${Math.max(0, (toolResults.katana?.parsed?.length || 0) - summaryUi.superficie)}`);
 
+    const scoringStart = Date.now();
     const toolCounters = resumenHerramientas(reconocimiento, toolResults, findingsDeduplicados);
-    const risk = calcularRiskScore(findingsDeduplicados);
+    const aiCoverage = validateAIEnrichmentCoverage(findingsDeduplicados);
+    Object.assign(aiResult.stats, aiCoverage);
+    const deterministicRisk = calcularRiskScore(findingsDeduplicados, { correlations: correlacion.correlations });
+    const risk = await computeFinalRiskScoreWithAI(findingsDeduplicados, {
+      target: reconocimiento.target,
+      correlations: correlacion.correlations,
+      coverage: aiCoverage,
+      deterministicRisk
+    });
+    pipelineTimings.scoringDurationMs = Date.now() - scoringStart;
+    pipelineTimings.totalDurationMs = Date.now() - totalStart;
+    console.log(`[PIPELINE-END] totalDurationMs=${pipelineTimings.totalDurationMs} aiDurationMs=${pipelineTimings.aiDurationMs}`);
     const serializedToolResults = Object.fromEntries(
       Object.entries(toolResults).map(([tool, result]) => [
         tool,
@@ -436,16 +478,37 @@ app.post('/analizar', async (req, res) => {
     const dashboardMetrics = buildDashboardMetrics(findingsDeduplicados, serializedToolResults);
 
     enviar({ type: 'progress', tool: 'correlacion', status: 'success', message: `${correlacion.correlations.length} relaciones detectadas` });
-    enviar({ type: 'progress', tool: 'score final', status: risk.risk_score === null ? 'skipped' : 'success', message: etiquetaRiesgo(risk) });
-    enviar({ type: 'progress', tool: 'informe', status: 'ready', message: 'PDF disponible tras finalizar' });
+    enviar({
+      type: 'progress',
+      tool: 'score final',
+      status: risk.risk_score === null ? 'skipped' : 'success',
+      message: risk.risk_score === null
+        ? '[PARTIAL] score global ia - pendiente por cobertura incompleta'
+        : `[SUCCESS] score global ia - ${risk.risk_score}/100 Riesgo ${risk.risk_level}`
+    });
+    enviar({
+      type: 'progress',
+      tool: 'informe',
+      status: aiCoverage.complete && risk.aiFinalScoreStatus === 'success' ? 'ready' : 'partial',
+      message: aiCoverage.complete && risk.aiFinalScoreStatus === 'success' ? 'PDF disponible tras finalizar' : 'PDF bloqueado hasta completar la revision IA'
+    });
 
     const respuesta = {
       target: reconocimiento.target,
-      status: 'completed',
+      status: aiCoverage.complete && risk.aiFinalScoreStatus === 'success' ? 'completed' : 'completed_partial',
       findings: findingsDeduplicados,
       findings_reportables: findingsInforme,
       groups: grupos,
       dashboard_metrics: dashboardMetrics,
+      probability_stats: reconciliacionFinal.probabilityStats,
+      ai_personalization_stats: {
+        ...reconciliacionFinal.aiPersonalizationStats,
+        ...aiResult.stats,
+        selectedForIndividualAI: aiResult.stats.selected,
+        aiCallsMade: aiResult.stats.callsMade,
+        aiFailed: aiResult.stats.aiFailed,
+        aiFallback: aiResult.stats.aiFallback
+      },
       gf_candidates: construirCandidatosGf(toolResults),
       tool_results: serializedToolResults,
       tool_counters: toolCounters,
@@ -454,12 +517,24 @@ app.post('/analizar', async (req, res) => {
       risk_score: risk.risk_score,
       risk_level: risk.risk_level,
       risk_grade: risk.risk_grade,
+      risk_score_breakdown: risk.risk_score_breakdown || risk.riskScoreBreakdown || null,
+      deterministicScoreBeforeAI: risk.deterministicScoreBeforeAI,
+      aiFinalScore100: risk.aiFinalScore100,
+      finalScoreSource: risk.finalScoreSource,
+      aiFinalScoreReason: risk.aiFinalScoreReason,
+      aiFinalRiskLevel: risk.aiFinalRiskLevel,
+      aiFinalScoreStatus: risk.aiFinalScoreStatus,
+      aiGlobalReview: risk.aiGlobalReview || null,
+      ai_stats: aiResult.stats,
+      pipeline_timings: pipelineTimings,
       sqlmap_notice: toolResults.sqlmap?.status === 'skipped' ? toolResults.sqlmap.error : null,
-      ai_notice: findings.some(f => f.ai_status === 'failed')
-        ? 'La IA no respondió, se muestra análisis técnico básico.'
-        : null,
+      ai_notice: !aiCoverage.complete
+        ? `[PARTIAL] IA - ${aiCoverage.aiProcessed}/${aiCoverage.totalReportableFindings} enriquecidos, ${aiCoverage.aiFailed} fallidos, templates finales usados: ${aiCoverage.templateUsedFinal}`
+        : risk.aiFinalScoreStatus !== 'success'
+          ? `[PARTIAL] IA - enriquecimiento completo, score global pendiente: ${risk.aiFinalScoreReason || 'respuesta IA no valida'}`
+          : null,
       summary_ui: summaryUi,
-      summary: dashboardMetrics.severityDistribution.reportable
+      summary: dashboardMetrics.statusDistribution
     };
 
     console.log('\n========== ANALISIS POR HERRAMIENTAS ==========');
@@ -483,6 +558,8 @@ app.post('/analizar-stream', async (req, res) => {
   res.setHeader('X-Accel-Buffering', 'no');
 
   try {
+    const totalStart = Date.now();
+    const pipelineTimings = {};
     const entrada = req.body.prompt || req.body.target;
 
     if (!entrada || typeof entrada !== 'string' || !entrada.trim()) {
@@ -493,6 +570,7 @@ app.post('/analizar-stream', async (req, res) => {
     scanLogger = crearScanLogger(entrada.trim());
     scanLogger.variable('entrada', entrada.trim());
 
+    const toolsStart = Date.now();
     const reconocimiento = await ejecutarReconocimiento(entrada.trim(), {
       scanLogger,
       onProgress: progress => {
@@ -503,6 +581,7 @@ app.post('/analizar-stream', async (req, res) => {
         });
       }
     });
+    pipelineTimings.toolsDurationMs = Date.now() - toolsStart;
     const toolResults = reconocimiento.tool_results || {};
     const findings = [];
 
@@ -519,6 +598,7 @@ app.post('/analizar-stream', async (req, res) => {
       return;
     }
 
+    const normalizationStart = Date.now();
     for (const [tool, result] of Object.entries(toolResults)) {
       scanLogger.progress(tool, 'running', `Clasificando hallazgos de ${tool}`);
       enviar({ type: 'progress', tool, status: 'running', message: `Clasificando hallazgos de ${tool}` });
@@ -526,7 +606,6 @@ app.post('/analizar-stream', async (req, res) => {
         extraerFindingsDeterministas(tool, result, reconocimiento.target)
       );
       const descartadosInfo = findingsDeterministas.filter(f => !f.isVulnerability || f.type === 'reconocimiento').length;
-      const findingsParaIA = findingsDeterministas.filter(debeAnalizarHallazgoIA);
 
       result.findings = findingsDeterministas;
       result.metrics = {
@@ -534,17 +613,17 @@ app.post('/analizar-stream', async (req, res) => {
         producidos: result.metrics?.producidos ?? (Array.isArray(result.parsed) ? result.parsed.length : 0),
         descartados_info_fingerprinting: descartadosInfo,
         descartados_assets: result.metrics?.descartados_assets ?? findingsDeterministas.filter(f => f.type === 'discarded').length,
-        enviados_ia: result.metrics?.enviados_ia ?? findingsParaIA.length,
-        no_enviados_ia: result.metrics?.no_enviados_ia ?? (findingsDeterministas.length - findingsParaIA.length)
+        enviados_ia: 0,
+        no_enviados_ia: findingsDeterministas.length
       };
 
       scanLogger.variable(`findingsDeterministas.${tool}`, findingsDeterministas);
       scanLogger.variable(`descartadosInfo.${tool}`, descartadosInfo);
-      scanLogger.variable(`findingsParaIA.${tool}`, findingsParaIA);
+      scanLogger.variable(`findingsParaIA.${tool}`, []);
       scanLogger.variable(`result.metrics.${tool}`, result.metrics);
 
       if (tool === 'katana') {
-        const superficieUtil = findingsDeterministas.filter(f => f.type === 'surface').length;
+        const superficieUtil = countFindingsByToolStatus(findingsDeterministas, 'katana', 'surface');
         result.metrics.superficie_util = superficieUtil;
         result.metrics.descartados_ruido = Math.max(
           0,
@@ -553,68 +632,42 @@ app.post('/analizar-stream', async (req, res) => {
         result.metrics.enviados_ia = 0;
       }
 
-      if (findingsParaIA.length > 0) {
-        try {
-          scanLogger.progress(`ia/${tool}`, 'running', `IA explicando hallazgos de ${tool}`, {
-            findings: findingsParaIA.length
-          });
-          scanLogger.variable(`findingsParaIA.${tool}`, findingsParaIA);
-          enviar({ type: 'progress', tool: `ia/${tool}`, status: 'running', message: `IA explicando hallazgos de ${tool}` });
-          const findingsIA = await enriquecerFindingsIA(
-            reconocimiento.target,
-            tool,
-            findingsParaIA,
-            scanLogger
-          );
-          scanLogger.variable(`findingsIA.${tool}`, findingsIA);
-
-          if (findingsIA.length > 0) {
-            const enriquecidos = new Map(clasificarFindings(findingsIA).map(f => [f.id, f]));
-            result.findings = result.findings.map(f => enriquecidos.get(f.id) || f);
-          }
-          scanLogger.variable(`result.findings.${tool}`, result.findings);
-          scanLogger.progress(`ia/${tool}`, 'done', `IA finalizada para ${tool}`);
-          enviar({ type: 'progress', tool: `ia/${tool}`, status: 'done', message: `IA finalizada para ${tool}` });
-        } catch (error) {
-          scanLogger.progress(`ia/${tool}`, 'error', error.message);
-          scanLogger.section(`ERROR IA: ${tool}`, {
-            error: error.message,
-            stack: error.stack || null,
-            findings_enviados: findingsParaIA
-          });
-          enviar({ type: 'progress', tool: `ia/${tool}`, status: 'error', message: error.message });
-          result.error = [
-            result.error,
-            `IA no pudo enriquecer ${tool}: ${error.message}`
-          ].filter(Boolean).join(' | ');
-          result.findings = result.findings.map(f =>
-            findingsParaIA.some(item => item.id === f.id)
-              ? aplicarFallbackIa([f])[0]
-              : f
-          );
-          scanLogger.variable(`result.findings.${tool}`, result.findings);
-        }
-      }
-
-      if (findingsParaIA.length === 0) {
-        scanLogger.variable(`result.findings.${tool}`, result.findings);
-      }
+      scanLogger.variable(`result.findings.${tool}`, result.findings);
 
       result.findings = normalizeFindingsForReporting(result.findings || []);
       scanLogger.variable(`result.findings.normalized.${tool}`, result.findings);
       findings.push(...(result.findings || []));
     }
+    pipelineTimings.normalizationDurationMs = Date.now() - normalizationStart;
 
     scanLogger.progress('correlacion', 'running', 'Correlacionando hallazgos');
     enviar({ type: 'progress', tool: 'correlacion', status: 'running', message: 'Correlacionando hallazgos' });
+    const correlationStart = Date.now();
     scanLogger.variable('findings', findings);
     const findingsDeduplicadosBase = deduplicarFindings(findings);
     scanLogger.variable('findingsDeduplicadosBase', findingsDeduplicadosBase);
     const correlacion = correlacionarFindings(findingsDeduplicadosBase, toolResults);
     scanLogger.variable('correlacion', correlacion);
     const reconciliacion = reconcileFindings(correlacion.findings, { logger: scanLogger });
-    const findingsDeduplicados = reconciliacion.findings;
-    const grupos = reconciliacion.groups;
+    pipelineTimings.correlationDurationMs = Date.now() - correlationStart;
+
+    const aiStart = Date.now();
+    const aiResult = await enrichEveryReportableFindingIndividuallyWithAI(
+      reconocimiento.target,
+      reconciliacion.findings,
+      correlacion.correlations,
+      { scanLogger, enviar }
+    );
+    pipelineTimings.aiSelectionDurationMs = aiResult.stats.selectionDurationMs;
+    pipelineTimings.aiDurationMs = Date.now() - aiStart;
+
+    const finalReconcileStart = Date.now();
+    const reconciliacionFinal = reconcileFindings(aiResult.findings, { logger: scanLogger });
+    const findingsDeduplicados = reconciliacionFinal.findings;
+    const grupos = reconciliacionFinal.groups;
+    syncFinalFindingsToToolResults(toolResults, findingsDeduplicados);
+    logToolFindingsSync(toolResults, scanLogger);
+    pipelineTimings.finalReconcileDurationMs = Date.now() - finalReconcileStart;
     scanLogger.variable('findingsDeduplicados', findingsDeduplicados);
     scanLogger.variable('grupos', grupos);
     const findingsInforme = [
@@ -623,11 +676,25 @@ app.post('/analizar-stream', async (req, res) => {
     ];
     scanLogger.variable('findingsInforme', findingsInforme);
     const summaryUi = construirResumenUI(grupos);
+    const scoringStart = Date.now();
     const toolCounters = resumenHerramientas(reconocimiento, toolResults, findingsDeduplicados);
-    const risk = calcularRiskScore(findingsDeduplicados);
+    const aiCoverage = validateAIEnrichmentCoverage(findingsDeduplicados);
+    Object.assign(aiResult.stats, aiCoverage);
+    const deterministicRisk = calcularRiskScore(findingsDeduplicados, { correlations: correlacion.correlations });
+    const risk = await computeFinalRiskScoreWithAI(findingsDeduplicados, {
+      target: reconocimiento.target,
+      correlations: correlacion.correlations,
+      coverage: aiCoverage,
+      deterministicRisk,
+      scanLogger
+    });
+    pipelineTimings.scoringDurationMs = Date.now() - scoringStart;
+    pipelineTimings.totalDurationMs = Date.now() - totalStart;
     scanLogger.variable('summaryUi', summaryUi);
     scanLogger.variable('toolCounters', toolCounters);
     scanLogger.variable('risk', risk);
+    scanLogger.variable('pipeline.timings', pipelineTimings);
+    console.log(`[PIPELINE-END] totalDurationMs=${pipelineTimings.totalDurationMs} aiDurationMs=${pipelineTimings.aiDurationMs}`);
     const serializedToolResults = Object.fromEntries(
       Object.entries(toolResults).map(([tool, result]) => [
         tool,
@@ -643,11 +710,20 @@ app.post('/analizar-stream', async (req, res) => {
 
     const respuesta = {
       target: reconocimiento.target,
-      status: 'completed',
+      status: aiCoverage.complete && risk.aiFinalScoreStatus === 'success' ? 'completed' : 'completed_partial',
       findings: findingsDeduplicados,
       findings_reportables: findingsInforme,
       groups: grupos,
       dashboard_metrics: dashboardMetrics,
+      probability_stats: reconciliacionFinal.probabilityStats,
+      ai_personalization_stats: {
+        ...reconciliacionFinal.aiPersonalizationStats,
+        ...aiResult.stats,
+        selectedForIndividualAI: aiResult.stats.selected,
+        aiCallsMade: aiResult.stats.callsMade,
+        aiFailed: aiResult.stats.aiFailed,
+        aiFallback: aiResult.stats.aiFallback
+      },
       gf_candidates: construirCandidatosGf(toolResults),
       tool_results: serializedToolResults,
       tool_counters: toolCounters,
@@ -656,12 +732,24 @@ app.post('/analizar-stream', async (req, res) => {
       risk_score: risk.risk_score,
       risk_level: risk.risk_level,
       risk_grade: risk.risk_grade,
+      risk_score_breakdown: risk.risk_score_breakdown || risk.riskScoreBreakdown || null,
+      deterministicScoreBeforeAI: risk.deterministicScoreBeforeAI,
+      aiFinalScore100: risk.aiFinalScore100,
+      finalScoreSource: risk.finalScoreSource,
+      aiFinalScoreReason: risk.aiFinalScoreReason,
+      aiFinalRiskLevel: risk.aiFinalRiskLevel,
+      aiFinalScoreStatus: risk.aiFinalScoreStatus,
+      aiGlobalReview: risk.aiGlobalReview || null,
+      ai_stats: aiResult.stats,
+      pipeline_timings: pipelineTimings,
       sqlmap_notice: toolResults.sqlmap?.status === 'skipped' ? toolResults.sqlmap.error : null,
-      ai_notice: findings.some(f => f.ai_status === 'failed')
-        ? 'La IA no respondio, se muestra analisis tecnico basico.'
-        : null,
+      ai_notice: !aiCoverage.complete
+        ? `[PARTIAL] IA - ${aiCoverage.aiProcessed}/${aiCoverage.totalReportableFindings} enriquecidos, ${aiCoverage.aiFailed} fallidos, templates finales usados: ${aiCoverage.templateUsedFinal}`
+        : risk.aiFinalScoreStatus !== 'success'
+          ? `[PARTIAL] IA - enriquecimiento completo, score global pendiente: ${risk.aiFinalScoreReason || 'respuesta IA no valida'}`
+          : null,
       summary_ui: summaryUi,
-      summary: dashboardMetrics.severityDistribution.reportable
+      summary: dashboardMetrics.statusDistribution
     };
 
     scanLogger.variable('respuesta', respuesta);
@@ -693,15 +781,33 @@ app.post('/generar-informe', async (req, res) => {
       clasificarFindings(normalizarFindings(req.body.findings, 'otra', target.trim()))
     );
     const findings = reconcileFindings(findingsNormalizados).findings;
+    const aiCoverage = validateAIEnrichmentCoverage(findings);
+    if (!aiCoverage.complete) {
+      return res.status(409).json({
+        error: `PDF bloqueado: cobertura IA ${aiCoverage.aiProcessed}/${aiCoverage.totalReportableFindings}; ${aiCoverage.aiFailed} hallazgos pendientes.`,
+        aiCoverage
+      });
+    }
+    if (req.body.finalScoreSource !== 'ai_global_review' || req.body.aiFinalScoreStatus !== 'success' || !Number.isFinite(Number(req.body.aiFinalScore100))) {
+      return res.status(409).json({ error: 'PDF bloqueado: falta una revision IA global valida sobre todos los hallazgos enriquecidos.' });
+    }
     generarPdfAuditoria(res, target.trim(), findings, {
       gfCandidates: req.body.gf_candidates || {},
       toolResults: req.body.tool_results || {},
       toolCounters: req.body.tool_counters || {},
       correlations: req.body.correlations || [],
       pipelineTimeline: req.body.pipeline_timeline || [],
-      risk_score: req.body.risk_score,
+      risk_score: Number(req.body.aiFinalScore100),
       risk_level: req.body.risk_level,
       risk_grade: req.body.risk_grade,
+      risk_score_breakdown: req.body.risk_score_breakdown || {},
+      deterministicScoreBeforeAI: req.body.deterministicScoreBeforeAI,
+      aiFinalScore100: Number(req.body.aiFinalScore100),
+      finalScoreSource: req.body.finalScoreSource,
+      aiFinalScoreReason: req.body.aiFinalScoreReason,
+      aiFinalRiskLevel: req.body.aiFinalRiskLevel,
+      aiFinalScoreStatus: req.body.aiFinalScoreStatus,
+      aiStats: req.body.ai_stats || req.body.ai_personalization_stats || aiCoverage,
       sqlmap_notice: req.body.sqlmap_notice,
       ai_notice: req.body.ai_notice
     });

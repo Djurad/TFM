@@ -90,6 +90,38 @@ function parsearDalfox(output) {
     });
 }
 
+function esDalfoxConfirmado(item = {}) {
+  const tipo = String(item.type || item.severity || '').trim().toUpperCase();
+  const evidencia = [
+    item.message_str,
+    item.message,
+    item.evidence,
+    item.payload,
+    item.poc,
+    item.data
+  ].filter(Boolean).join(' ');
+
+  return tipo === 'V' ||
+    item.vulnerable === true ||
+    /triggered\s+xss\s+payload|found\s+dom\s+object|verified\s+xss|\bVULN\b/i.test(evidencia);
+}
+
+function construirIntentoDalfox(url, intento = 0) {
+  if (intento % 2 === 0) {
+    return {
+      modo: 'url',
+      args: ['url', url, '--silence', '--format', 'json'],
+      input: ''
+    };
+  }
+
+  return {
+    modo: 'pipe',
+    args: ['pipe', '--silence', '--format', 'json'],
+    input: `${url}\n`
+  };
+}
+
 async function ejecutarDalfox(urls = [], opciones = {}) {
   const urlsValidas = deduplicarUrls(urls);
   const timeoutMs = Number(opciones.timeoutMs || 180000);
@@ -108,7 +140,6 @@ async function ejecutarDalfox(urls = [], opciones = {}) {
   let errores = 0;
   let reintentos = 0;
   const maxReintentos = Number(process.env.DALFOX_RETRIES || 1);
-  const dalfoxArgs = ['pipe', '--silence', '--format', 'json'];
 
   if (urlsValidas.length === 0) {
     const skipped = {
@@ -132,29 +163,33 @@ async function ejecutarDalfox(urls = [], opciones = {}) {
   progreso('dalfox', 'running', `Ejecutando Dalfox sobre ${urlsValidas.length} URLs`);
 
   for (const url of urlsValidas) {
-    const input = `${url}\n`;
-    inputPorUrl[url] = input;
-    argsPorUrl[url] = dalfoxArgs;
+    inputPorUrl[url] = [];
+    argsPorUrl[url] = [];
     timeoutPorUrl[url] = timeoutMs;
-    logVar(`dalfox.inputPorUrl.${url}`, input);
     logVar(`dalfox.binarioPorUrl.${url}`, 'dalfox');
-    logVar(`dalfox.argsPorUrl.${url}`, dalfoxArgs);
     logVar(`dalfox.timeoutPorUrl.${url}`, timeoutMs);
 
     for (let intento = 0; intento <= maxReintentos; intento += 1) {
       try {
         if (intento > 0) reintentos += 1;
+        const estrategia = construirIntentoDalfox(url, intento);
+        inputPorUrl[url].push(estrategia.input);
+        argsPorUrl[url].push(estrategia.args);
+        logVar(`dalfox.modoPorUrl.${url}.intento${intento + 1}`, estrategia.modo);
+        logVar(`dalfox.inputPorUrl.${url}.intento${intento + 1}`, estrategia.input || '(URL enviada como argumento)');
+        logVar(`dalfox.argsPorUrl.${url}.intento${intento + 1}`, estrategia.args);
         registrarPaso('dalfox', 'ejecutando URL individual', {
           entrada: url,
           intento: intento + 1,
           maxIntentos: maxReintentos + 1,
-          args: dalfoxArgs,
+          modo: estrategia.modo,
+          args: estrategia.args,
           timeoutMs
         });
         const raw = await ejecutarConInput(
           'dalfox',
-          dalfoxArgs,
-          input,
+          estrategia.args,
+          estrategia.input,
           {
             timeout: timeoutMs,
             permitirFalloSinSalida: true
@@ -179,6 +214,7 @@ async function ejecutarDalfox(urls = [], opciones = {}) {
         if (intento >= maxReintentos) break;
         registrarPaso('dalfox', 'sin hallazgos en intento; reintentando URL individual', {
           entrada: url,
+          siguienteModo: construirIntentoDalfox(url, intento + 1).modo,
           rawLength: raw.length,
           parsed: parsed.length
         });
@@ -188,6 +224,14 @@ async function ejecutarDalfox(urls = [], opciones = {}) {
         parsedPorUrl[url] = parsedPorUrl[url] || [];
         logVar(`dalfox.errorPorUrl.${url}.intento${intento + 1}`, error.message);
         console.error(`Error en dalfox para ${url}:`, error.message);
+        if (intento < maxReintentos) {
+          registrarPaso('dalfox', 'modo de ejecucion fallido; probando fallback', {
+            entrada: url,
+            error: error.message,
+            siguienteModo: construirIntentoDalfox(url, intento + 1).modo
+          });
+          continue;
+        }
         break;
       }
     }
@@ -195,6 +239,15 @@ async function ejecutarDalfox(urls = [], opciones = {}) {
     logVar(`dalfox.rawPorUrl.${url}`, rawPorUrl[url] || '');
     logVar(`dalfox.parsedPorUrl.${url}`, parsedPorUrl[url] || []);
   }
+
+  const confirmados = parsedTotal.filter(esDalfoxConfirmado);
+  const posibles = parsedTotal.filter(item => !esDalfoxConfirmado(item));
+  console.log(`[DALFOX-PARSE] rawFindings=${parsedTotal.length} confirmedXss=${confirmados.length} possibleXss=${posibles.length}`);
+  registrarPaso('dalfox', 'parse finalizado', {
+    rawFindings: parsedTotal.length,
+    confirmedXss: confirmados.length,
+    possibleXss: posibles.length
+  });
 
   const result = {
     status: errores === 0 ? 'success' : parsedTotal.length > 0 ? 'partial' : 'error',
@@ -205,11 +258,12 @@ async function ejecutarDalfox(urls = [], opciones = {}) {
     metrics: {
       urls_analizadas: urlsValidas.length,
       hallazgos: parsedTotal.length,
-      confirmadas: parsedTotal.filter(item => String(item.type || '').toUpperCase() === 'V').length,
+      confirmadas: confirmados.length,
+      posibles: posibles.length,
       errores,
       reintentos,
       max_reintentos_por_url: maxReintentos,
-      comando: 'dalfox pipe --silence --format json',
+      comando: 'dalfox url <URL> --silence --format json; fallback dalfox pipe',
       timeout_ms: timeoutMs
     }
   };
@@ -229,6 +283,8 @@ async function ejecutarDalfox(urls = [], opciones = {}) {
 }
 
 module.exports = {
+  construirIntentoDalfox,
   ejecutarDalfox,
+  esDalfoxConfirmado,
   parsearDalfox
 };

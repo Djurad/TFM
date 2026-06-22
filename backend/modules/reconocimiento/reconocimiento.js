@@ -16,6 +16,8 @@ const { ejecutarRobotsSitemap } = require('./analizadores/robotsSitemap');
 const { ejecutarTls } = require('./analizadores/tls');
 const { ejecutarPorts } = require('./analizadores/ports');
 const { extraerFindingsDeterministas } = require('../procesamiento/extractores');
+const { clasificarFindings } = require('../procesamiento/clasificadorFindings');
+const { normalizeFindingsForReporting } = require('../priorizacion/findingGroups');
 
 function limpiarColoresANSI(texto = '') {
   return texto.replace(/\x1B\[[0-9;]*m/g, '');
@@ -241,6 +243,23 @@ function buscarHttpInfo(url, httpx = []) {
 
 function registrarPaso(nombre, mensaje, extra = {}) {
   console.log(`[recon] ${nombre}: ${mensaje}`, Object.keys(extra).length ? extra : '');
+}
+
+function sincronizarFindingsToolResults(toolResults = {}, target, logVar = null) {
+  Object.entries(toolResults).forEach(([tool, result]) => {
+    if (!result || typeof result !== 'object') return;
+    const findings = normalizeFindingsForReporting(
+      clasificarFindings(extraerFindingsDeterministas(tool, result, target))
+    );
+
+    result.findings = findings;
+    result.metrics = {
+      ...(result.metrics || {}),
+      findings_generados: findings.length
+    };
+
+    if (logVar) logVar(`toolResults.${tool}.findings`, findings);
+  });
 }
 
 async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
@@ -576,6 +595,8 @@ async function ejecutarReconocimiento(targetOriginal, opciones = {}) {
   toolResults.trufflehog = trufflehogResult;
   logVar('toolResults.trufflehog', toolResults.trufflehog);
   progreso('trufflehog', trufflehogResult.status || 'done', 'Trufflehog finalizado');
+
+  sincronizarFindingsToolResults(toolResults, target, logVar);
 
   return {
     target,

@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "server.js",
   "scripts": {
-    "test": "node tests/findingGroups.test.js && node tests/dalfox.test.js && node tests/pipelineQuality.test.js",
+    "test": "node tests/runAll.js",
     "start": "node server.js"
   },
   "keywords": [],

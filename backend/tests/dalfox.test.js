@@ -1,5 +1,5 @@
 const assert = require('assert');
-const { parsearDalfox } = require('../modules/reconocimiento/herramientas/dalfox');
+const { construirIntentoDalfox, parsearDalfox } = require('../modules/reconocimiento/herramientas/dalfox');
 const { extraerFindingsDeterministas } = require('../modules/procesamiento/extractores');
 const { clasificarFindings } = require('../modules/procesamiento/clasificadorFindings');
 const { buildFindingGroups } = require('../modules/priorizacion/findingGroups');
@@ -39,10 +39,26 @@ function testConfirmedDalfoxFinding() {
   assert.strictEqual(groups.confirmed[0].param, 'HostName');
   assert.ok(groups.confirmed[0].payload.includes('<svg'));
   assert.ok(groups.confirmed[0].affected_url.includes('serverStatusCheckService.jsp'));
-  assert.ok((risk.risk_score || 0) >= 35);
+  assert.ok((risk.risk_score || 0) >= 65);
+  assert.ok((risk.risk_score || 0) <= 72);
+  assert.notStrictEqual(risk.risk_level, 'critico');
+}
+
+function testDalfoxUsesARealFallbackMode() {
+  const target = 'https://example.test/search?q=';
+  const first = construirIntentoDalfox(target, 0);
+  const second = construirIntentoDalfox(target, 1);
+
+  assert.strictEqual(first.modo, 'url');
+  assert.deepStrictEqual(first.args.slice(0, 2), ['url', target]);
+  assert.strictEqual(first.input, '');
+  assert.strictEqual(second.modo, 'pipe');
+  assert.strictEqual(second.args[0], 'pipe');
+  assert.strictEqual(second.input, `${target}\n`);
 }
 
 testParserFormats();
 testConfirmedDalfoxFinding();
+testDalfoxUsesARealFallbackMode();
 
 console.log('dalfox tests passed');

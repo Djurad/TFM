@@ -4,105 +4,241 @@
 
 Este proyecto forma parte del Trabajo Fin de Máster desarrollado por **Diego Ramiro Jurado Reyna** y **José Antonio Montes Solano**.
 
-El objetivo es el desarrollo de un sistema de apoyo al pentesting web automatizado mediante inteligencia artificial, orientado a mejorar la fase de reconocimiento en auditorías de seguridad. El sistema permite estructurar la superficie de ataque, priorizar riesgos y generar respuestas que faciliten el análisis por parte del pentester.
+La herramienta implementa una plataforma de apoyo al pentesting web que automatiza tareas de reconocimiento, clasificación de hallazgos, priorización de riesgos, enriquecimiento mediante inteligencia artificial local y generación de informes técnicos en PDF.
+
+El objetivo no es sustituir al pentester, sino acelerar la fase de descubrimiento y análisis inicial: la herramienta recopila evidencias, separa vulnerabilidades confirmadas de candidatos o elementos de superficie, estima criticidad y probabilidad, y presenta la información de forma trazable para facilitar la validación manual y la remediación.
 
 ---
 
-## Arquitectura del sistema
+## Qué realiza la herramienta
 
-El sistema sigue una arquitectura distribuida:
+La aplicación ejecuta un pipeline completo de auditoría web defensiva sobre un dominio o URL autorizado. A alto nivel:
 
-- **Windows (host):** ejecuta Ollama (modelo de IA)  
-- **WSL Ubuntu:** ejecuta backend, frontend y herramientas de reconocimiento  
+1. Normaliza el objetivo introducido por el usuario.
+2. Descubre subdominios y activos HTTP/HTTPS vivos.
+3. Ejecuta comprobaciones pasivas de configuración.
+4. Descubre rutas, endpoints y URLs históricas.
+5. Prioriza candidatos mediante patrones de seguridad.
+6. Ejecuta herramientas de validación como Dalfox, SQLMap, Nuclei y TruffleHog cuando aplica.
+7. Normaliza y deduplica todos los hallazgos.
+8. Clasifica cada hallazgo por estado: confirmado, posible, candidato, hardening, superficie, informativo o descartado.
+9. Enriquece individualmente con IA todos los hallazgos reportables.
+10. Calcula una puntuación global final mediante una revisión IA sobre todos los hallazgos enriquecidos.
+11. Muestra los resultados en la interfaz web.
+12. Genera un informe PDF solo si la cobertura de IA es completa.
 
-La comunicación con la IA se realiza mediante HTTP desde WSL hacia el servicio de Ollama en Windows.
+La herramienta distingue expresamente entre:
 
----
-
-## Requisitos previos
-
-### 1. Ollama (en Windows)
-
-Descargar e instalar Ollama desde:  
-https://ollama.com/
-
-Ejecutar Ollama en modo servidor accesible desde la red:
-
-```
-OLLAMA_HOST=0.0.0.0 ollama serve
-```
-
-El valor `0.0.0.0` permite que Ollama escuche peticiones desde cualquier IP, no solo desde `localhost`.
-
-Cargar el modelo:
-
-```
-ollama run llama3
-```
+- **Vulnerabilidades confirmadas:** evidencias reproducibles o de alta confianza.
+- **Vulnerabilidades posibles:** indicios relevantes que requieren validación adicional.
+- **Candidatos GF:** URLs o parámetros priorizados por patrones, pero no confirmados.
+- **Hardening:** mejoras defensivas de configuración.
+- **Superficie:** recursos o servicios expuestos que amplían el reconocimiento.
+- **Informativos:** datos útiles de inventario o contexto.
+- **Descartados:** ruido, duplicados o elementos no reportables.
 
 ---
 
-### 2. Configuración de Firewall (Windows)
+## Filosofía de análisis
 
-Permitir conexiones al puerto **11434**:
+El sistema está diseñado para evitar dos errores habituales en informes automatizados:
 
-- Crear regla de entrada en el Firewall de Windows  
-- Puerto: **11434**  
-- Protocolo: TCP  
-- Acción: Permitir  
+- Inflar candidatos o superficie como si fueran vulnerabilidades confirmadas.
+- Ocultar carencias del análisis mediante textos genéricos o plantillas.
 
----
+Por ello, la herramienta separa:
 
-### 3. WSL Ubuntu
+- **criticidad potencial**, es decir, el impacto si el hallazgo se confirma;
+- **probabilidad real**, basada en la evidencia disponible;
+- **estado del hallazgo**, por ejemplo confirmado, posible, candidato o hardening;
+- **evidencia técnica**, herramienta, endpoint, parámetro, payload y observaciones;
+- **confianza**, según la calidad de la señal;
+- **riesgo global**, calculado después de revisar todos los hallazgos enriquecidos.
 
-Instalar y usar una distribución Ubuntu en WSL para ejecutar el backend, el frontend y las herramientas externas del pipeline.
-
-Desde PowerShell:
-
-```powershell
-wsl --install -d Ubuntu
-```
-
-Una vez instalado WSL, abrir Ubuntu y situarse en la carpeta del proyecto. Si el repositorio está en Windows, se puede acceder desde WSL mediante `/mnt/c/...`.
-
-Ejemplo:
-
-```bash
-cd /mnt/c/Users/Diego/Documents/workspaceTFM/TFM
-```
+Los candidatos críticos de GF, por ejemplo un posible RCE, se muestran como criticidad potencial alta o crítica, pero con probabilidad baja si no existe ejecución confirmada. Del mismo modo, un hallazgo de superficie como Swagger/OpenAPI público no se presenta como vulnerabilidad confirmada, sino como exposición útil para reconocimiento.
 
 ---
 
-## Configuración del backend
+## Enriquecimiento obligatorio mediante IA
 
-Dentro de **WSL Ubuntu**, crear un archivo `.env` en la carpeta `backend/`:
+La IA es una parte central del sistema. Todos los hallazgos reportables deben pasar por una llamada individual al modelo local.
 
+Son reportables:
+
+- confirmados;
+- posibles;
+- candidatos GF;
+- hardening;
+- superficie;
+- informativos si aparecen en el informe.
+
+No se enriquecen:
+
+- descartados;
+- duplicados internos;
+- ruido no mostrado;
+- assets descartados.
+
+Cada hallazgo reportable recibe una petición IA individual con un JSON compacto del hallazgo. La IA debe devolver, como mínimo:
+
+```json
+{
+  "impact": "Impacto concreto del hallazgo.",
+  "recommendation": "Recomendación técnica concreta.",
+  "severity": "critical|high|medium|low|info",
+  "probability": 0,
+  "confidence": "high|medium|low",
+  "status": "confirmed|possible|candidate|hardening|surface|informational"
+}
 ```
-OLLAMA_HOST=IP_DEL_HOST_WINDOWS
-```
 
-Ejemplo:
+Los campos realmente imprescindibles para aceptar un enriquecimiento son `impact` y `recommendation`. Los campos cortos, como estado, severidad, probabilidad y confianza, pueden completarse o corregirse mediante guardrails deterministas si la respuesta IA es útil pero incompleta.
 
-```
-OLLAMA_HOST=192.168.1.100
+La salida final visible del hallazgo debe venir de IA o de una reparación de texto devuelto por IA. No se usan plantillas como impacto o recomendación final.
+
+---
+
+## Control de cobertura IA
+
+Antes de generar el PDF se valida la cobertura de enriquecimiento.
+
+Para cada hallazgo reportable se exige:
+
+- `aiProcessed = true`;
+- impacto procedente de IA o texto IA reparado;
+- recomendación procedente de IA o texto IA reparado;
+- ausencia de templates finales;
+- ausencia de fallback genérico final.
+
+Si la cobertura no es del 100 %, el informe queda bloqueado cuando `AI_REQUIRE_ALL_FINDINGS=true`.
+
+Ejemplo de estado correcto:
+
+```text
+[SUCCESS] analisis ia - 35/35 hallazgos enriquecidos por IA, templates finales usados: 0
+[SUCCESS] score global ia - 78/100 Riesgo high
 ```
 
 ---
 
-## Ejecución del proyecto
+## Scoring global
 
-Dentro de WSL Ubuntu:
+La herramienta calcula primero un score determinista interno y, después, si todos los hallazgos reportables han sido enriquecidos correctamente, solicita a la IA una revisión global.
 
+La revisión global recibe un resumen compacto de todos los hallazgos enriquecidos:
+
+- identificador;
+- herramienta;
+- familia;
+- estado;
+- criticidad;
+- probabilidad;
+- confianza;
+- endpoint;
+- resumen de impacto.
+
+La IA devuelve una puntuación final sobre 100:
+
+```json
+{
+  "score": 0,
+  "riskLevel": "critical|high|medium|low|info",
+  "reason": "",
+  "mainDrivers": [],
+  "whyNotHigher": "",
+  "whyNotLower": ""
+}
 ```
-cd backend
-npm install
-node server.js
+
+El score final mostrado en la interfaz y el PDF procede de esta revisión global IA cuando la cobertura es completa.
+
+Existen guardrails para evitar resultados incoherentes:
+
+- un candidato crítico con probabilidad baja no convierte por sí solo el sitio en crítico
+- el riesgo crítico global requiere evidencia crítica confirmada
+- un XSS confirmado de severidad alta no debe quedar hundido en un score bajo
+- hardening y superficie no pesan como vulnerabilidades confirmadas
+- los posibles pesan menos que los confirmados
+- los candidatos pesan menos que los posibles
+
+---
+
+## Pipeline de herramientas
+
+El orden principal del pipeline es:
+
+```text
+subfinder
+httpx
+headers
+cookies
+httpsRedirect
+tls
+robotsSitemap
+ports
+feroxbuster
+katana
+gau
+gf
+nuclei
+dalfox
+sqlmap
+trufflehog
+IA individual
+score global IA
+PDF
 ```
 
-Abrir en el navegador:
+### Herramientas y módulos usados
 
-```
-http://localhost:3000
+| Componente | Función |
+| --- | --- |
+| `subfinder` | Descubrimiento de subdominios. |
+| `httpx` | Identificación de activos vivos, códigos HTTP, títulos y tecnologías. |
+| `headers` | Revisión pasiva de cabeceras de seguridad y banners. |
+| `cookies` | Revisión de flags como `Secure`, `HttpOnly` y `SameSite`. |
+| `httpsRedirect` | Comprobación de redirección HTTP a HTTPS. |
+| `tls` | Análisis de certificado, expiración y metadatos TLS. |
+| `robotsSitemap` | Revisión de `robots.txt` y `sitemap.xml`. |
+| `ports` | Detección de puertos comunes abiertos con `nmap` o fallback TCP. |
+| `feroxbuster` | Descubrimiento de rutas y recursos ocultos o sensibles. |
+| `katana` | Crawling de endpoints modernos. |
+| `gau` | Recuperación de URLs históricas desde fuentes públicas. |
+| `gf` | Priorización de candidatos por patrones de XSS, SQLi, SSRF, LFI, RCE u Open Redirect. |
+| `nuclei` | Detección basada en plantillas de vulnerabilidades conocidas, con configuración conservadora. |
+| `dalfox` | Validación automatizada de XSS. |
+| `sqlmap` | Validación automatizada de SQL Injection sobre URLs parametrizadas. |
+| `trufflehog` | Búsqueda de secretos en recursos JavaScript o ficheros relevantes. |
+| `Ollama` | Modelo de IA local usado para enriquecer hallazgos y revisar el score global. |
+
+---
+
+## Arquitectura
+
+La arquitectura recomendada para la demo y el desarrollo es:
+
+- **Windows host:** ejecuta Ollama y el modelo de lenguaje local.
+- **WSL Ubuntu:** ejecuta backend, frontend y herramientas de pentesting.
+- **Frontend web:** interfaz HTML/JavaScript servida por Express.
+- **Backend Node.js:** orquesta herramientas, procesamiento, IA, scoring y PDF.
+
+La comunicación con Ollama se realiza mediante HTTP hacia el puerto `11434`.
+
+```text
+Usuario
+  │
+  ▼
+Frontend web
+  │
+  ▼
+Backend Node.js / Express
+  │
+  ├─ Herramientas externas: subfinder, httpx, katana, gau, gf, nuclei, dalfox, sqlmap...
+  ├─ Analizadores pasivos: headers, cookies, TLS, redirects, ports...
+  ├─ Procesamiento: normalización, deduplicación, clasificación y correlación
+  ├─ IA individual: enriquecimiento por hallazgo reportable
+  ├─ IA global: score final sobre 100
+  └─ PDFKit: generación de informe
 ```
 
 ---
@@ -111,115 +247,213 @@ http://localhost:3000
 
 ```text
 TFM/
-├── backend/                  # API, orquestación del pipeline y generación de informes
-│   ├── server.js             # servidor Express y rutas principales
+├── backend/
+│   ├── server.js                         # servidor Express y endpoints principales
+│   ├── scanLogger.js                     # logging detallado de ejecuciones
 │   ├── modules/
-│   │   ├── ia/               # comunicación con Ollama
-│   │   ├── reconocimiento/   # ejecución y parseo de herramientas de reconocimiento
-│   │   │   ├── analizadores/ # comprobaciones pasivas y análisis auxiliares
-│   │   │   └── herramientas/ # wrappers de subfinder, httpx, gau, nuclei, etc.
-│   │   ├── procesamiento/    # normalización, extracción y clasificación de hallazgos
-│   │   ├── priorizacion/     # scoring, correlación y agrupación de findings
-│   │   └── pdf/              # plantillas, estilos, gráficas y generación de PDF
-│   ├── tests/                # pruebas del backend y del pipeline
-│   └── tools/                # herramientas locales usadas por el backend
+│   │   ├── ia/                           # conexión con Ollama, prompts, cobertura y score global
+│   │   ├── reconocimiento/               # ejecución del pipeline de herramientas
+│   │   │   ├── analizadores/             # módulos pasivos: headers, cookies, TLS, puertos...
+│   │   │   └── herramientas/             # wrappers de subfinder, httpx, katana, gau, etc.
+│   │   ├── procesamiento/                # extractores, normalización y clasificación de findings
+│   │   ├── priorizacion/                 # scoring, grupos, correlaciones y reconciliación
+│   │   ├── pipeline/                     # estados auxiliares de herramientas
+│   │   └── pdf/                          # PDFKit, estilos, utilidades y plantilla de informe
+│   ├── tests/                            # pruebas automatizadas del backend
+│   └── package.json
 ├── frontend/
-│   ├── index.html            # interfaz principal
-│   └── app.js                # lógica de interacción con el backend
-├── logs/                     # salidas y evidencias de ejecuciones
-├── tools/                    # herramientas externas incluidas en el proyecto
-├── setup.sh                  # instalación base de dependencias
-├── herramientas.sh           # instalación/verificación de herramientas de pentesting
-├── package.json              # scripts y dependencias del proyecto
-└── .env.example              # ejemplo de configuración de entorno
+│   ├── index.html                        # interfaz principal
+│   └── app.js                            # lógica de UI, streaming y renderizado de resultados
+├── logs/                                 # logs de análisis y depuración
+├── tools/                                # herramientas externas incluidas, como sqlmap
+├── setup.sh                              # instalación completa recomendada
+├── herramientas.sh                       # instalación/verificación alternativa de herramientas
+├── .env.example                          # ejemplo de configuración
+└── README.md
 ```
 
 ---
 
-## Funcionamiento
+## Requisitos previos
 
-1. El usuario introduce un prompt  
-2. El frontend envía la petición al backend  
-3. El backend consulta el modelo de IA (Ollama en Windows)  
-4. Se obtiene la respuesta  
-5. Se muestra o se descarga en PDF  
+### Sistema recomendado
+
+- Windows 10/11.
+- WSL2 con Ubuntu.
+- Node.js 20 o superior en WSL.
+- Go, Cargo/Rust y herramientas de pentesting disponibles en `PATH`.
+- Ollama instalado en Windows.
+- Modelo compatible cargado en Ollama, por defecto `llama3`.
+
+### Dependencias principales del backend
+
+- `express`
+- `cors`
+- `dotenv`
+- `pdfkit`
 
 ---
 
-## Pruebas manuales de herramientas
+## Instalación
 
-Estos comandos permiten validar el pipeline por separado antes de ejecutar el analisis completo desde la interfaz:
+### 1. Instalar Ollama en Windows
 
-```bash
-subfinder -d demo.owasp-juice.shop
-echo demo.owasp-juice.shop | httpx -title -tech-detect -status-code
-feroxbuster -u https://demo.owasp-juice.shop --depth 1 --silent --json --time-limit 60s
-echo https://demo.owasp-juice.shop | katana -silent -depth 3 -jc -kf all
-gau demo.owasp-juice.shop
-gf xss urls.txt
-nuclei -u https://demo.owasp-juice.shop -severity low,medium,high,critical
-dalfox pipe --silence --format json < urls.txt
-sqlmap -u "https://testphp.vulnweb.com/listproducts.php?cat=1" --batch
-trufflehog filesystem ./tmp_scan --json
+Descargar Ollama desde:
+
+```text
+https://ollama.com/
 ```
 
-El orden del pipeline principal es: `subfinder`, `httpx`, `headers`, `cookies`, `httpsRedirect`, `tls`, `robotsSitemap`, `ports`, `feroxbuster`, `katana`, `gau`, `gf`, `nuclei`, `dalfox`, `sqlmap`, `trufflehog`.
+Iniciar Ollama escuchando en todas las interfaces:
 
-Los modulos `headers`, `cookies`, `httpsRedirect`, `tls` y `robotsSitemap` son pasivos/defensivos y usan APIs nativas de Node.js. `ports` usa `nmap` si esta instalado; si no, aplica un fallback TCP ligero sobre puertos comunes. Estos hallazgos se muestran como hardening, superficie o reconocimiento salvo evidencias de riesgo claro, por ejemplo certificados expirados o puertos de bases de datos/cache accesibles.
-
-Dependencias externas recomendadas en Linux/WSL:
-
-```bash
-go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
-go install github.com/projectdiscovery/httpx/cmd/httpx@latest
-go install github.com/projectdiscovery/katana/cmd/katana@latest
-go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
-go install github.com/hahwul/dalfox/v2@latest
-go install github.com/lc/gau/v2/cmd/gau@latest
-go install github.com/tomnomnom/gf@latest
-cargo install feroxbuster
-curl -sSfL https://raw.githubusercontent.com/trufflesecurity/trufflehog/main/scripts/install.sh | sh
-sudo apt install -y nmap
+```powershell
+$env:OLLAMA_HOST="0.0.0.0"
+ollama serve
 ```
 
-`gf` necesita patterns en `~/.gf`; los scripts `setup.sh` y `herramientas.sh` instalan un conjunto base. En Windows nativo varias herramientas Go/Rust funcionan si estan en `PATH`, pero para TFM/demo se recomienda WSL/Linux por compatibilidad con `feroxbuster`, `gf`, `gau` y `trufflehog`.
+Cargar el modelo:
 
-GF solo prioriza candidatos por patron; no confirma vulnerabilidades. Del mismo modo, la ausencia de cabeceras HTTP o flags de cookies se reporta como hardening/configuracion y no debe interpretarse como XSS/SQLi confirmado.
-
-Por defecto, Nuclei se ejecuta sobre activos HTTP vivos, usando las templates oficiales instaladas localmente. La configuracion es conservadora para TFM: severidades `critical,high,medium,low`, salida JSONL, sin color, y exclusion de tags ruidosos como `dns`, `tech`, `waf`, `cdn` y `favicon`. Esto evita que `tech-detect`, `waf-detect`, favicon o CDN se cuenten como vulnerabilidades. Nuclei complementa a Dalfox, SQLMap y TruffleHog; un resultado 0 significa que no hubo matches en las templates ejecutadas, no ausencia total de vulnerabilidades.
-
-Para incluir severidad `info` en modo avanzado sin tratarla como vulnerabilidad:
-
-```bash
-NUCLEI_INCLUDE_INFO=true node server.js
+```powershell
+ollama run llama3
 ```
 
-Sqlmap solo se ejecuta automaticamente sobre URLs con parametros. Si no se encuentran parametros, el backend devuelve el aviso `sqlmap no se ejecuto porque no se encontraron parametros`. Para permitir un crawl ligero de sqlmap cuando no haya parametros:
+Si se usa otro modelo, puede configurarse con `OLLAMA_MODEL` en `backend/.env`.
 
-```bash
-SQLMAP_CRAWL_IF_NO_PARAMS=true node server.js
+### 2. Permitir el puerto de Ollama
+
+En el Firewall de Windows, permitir conexiones TCP entrantes al puerto:
+
+```text
+11434
 ```
 
-Limites configurables para mantener el analisis acotado:
+Esto permite que el backend ejecutado en WSL consulte el servicio Ollama del host Windows.
+
+### 3. Instalar WSL Ubuntu
+
+Desde PowerShell:
+
+```powershell
+wsl --install -d Ubuntu
+```
+
+Abrir Ubuntu y situarse en la carpeta del proyecto. Si el repositorio está en Windows:
 
 ```bash
+cd /mnt/c/Users/Asus/Desktop/TFM
+```
+
+### 4. Instalar dependencias y herramientas
+
+Ejecutar el script de instalación:
+
+```bash
+chmod +x setup.sh
+./setup.sh
+```
+
+También existe un script alternativo centrado en herramientas:
+
+```bash
+chmod +x herramientas.sh
+./herramientas.sh
+```
+
+Los scripts instalan o verifican herramientas como:
+
+- subfinder;
+- httpx;
+- katana;
+- nuclei;
+- dalfox;
+- gau;
+- gf;
+- feroxbuster;
+- trufflehog;
+- nmap;
+- sqlmap en `tools/sqlmap`.
+
+---
+
+## Configuración
+
+Crear el archivo `backend/.env` a partir de `.env.example`:
+
+```bash
+cp .env.example backend/.env
+```
+
+Configurar como mínimo la dirección del host Windows donde escucha Ollama:
+
+```env
+OLLAMA_HOST=192.168.1.100
+OLLAMA_MODEL=llama3
+```
+
+También se puede usar una URL completa:
+
+```env
+OLLAMA_HOST=http://192.168.1.100:11434
+```
+
+### Configuración IA recomendada
+
+```env
+AI_MODE=complete
+AI_REQUIRE_ALL_FINDINGS=true
+AI_DISABLE_TEMPLATES=true
+AI_MAX_FINDINGS=0
+AI_MAX_INDIVIDUAL_FINDINGS=0
+AI_ENABLED_FOR_GF=true
+AI_ENABLED_FOR_SURFACE=true
+AI_ENABLED_FOR_LOW_HARDENING=true
+AI_DISABLE_TIMEOUTS=true
+AI_TIMEOUT_MS=0
+AI_SINGLE_FINDING_TIMEOUT_MS=0
+OLLAMA_REQUEST_TIMEOUT_MS=0
+AI_WAIT_LOG_INTERVAL_MS=60000
+```
+
+Interpretación:
+
+- `AI_MODE=complete`: todos los hallazgos reportables pasan por IA.
+- `AI_REQUIRE_ALL_FINDINGS=true`: el PDF se bloquea si falta cobertura IA.
+- `AI_DISABLE_TEMPLATES=true`: las plantillas no pueden ser salida final.
+- `AI_MAX_FINDINGS=0` y `AI_MAX_INDIVIDUAL_FINDINGS=0`: sin límite de hallazgos.
+- `AI_DISABLE_TIMEOUTS=true`: no se cancela una llamada IA por timeout artificial.
+- `AI_TIMEOUT_MS=0`: sin límite de espera para IA.
+
+### Límites del pipeline
+
+Variables útiles incluidas en `.env.example`:
+
+```env
 NUCLEI_TEMPLATES_PATH=
 NUCLEI_SEVERITIES=critical,high,medium,low
 NUCLEI_INCLUDE_INFO=false
 NUCLEI_TAGS=
 NUCLEI_RATE_LIMIT=
 NUCLEI_TIMEOUT_SECONDS=
+
 FEROX_WORDLIST=
 FEROX_DEPTH=1
 FEROX_TIME_LIMIT_SECONDS=60
 FEROX_THREADS=10
 MAX_FEROX_TARGETS=5
 MAX_FEROX_URLS=100
+
+ENABLE_GAU=true
+GAU_PROVIDERS=otx
+GAU_TIMEOUT_SECONDS=10
+GAU_FALLBACK_PROVIDERS=wayback,commoncrawl,urlscan
+GAU_ENABLE_PROVIDER_FALLBACK=true
+GAU_ENABLE_WAYBACKURLS_FALLBACK=true
 MAX_GAU_PARAM_URLS=100
 MAX_GAU_SURFACE_URLS=100
 MAX_GAU_TOTAL_AFTER_FILTER=300
 MAX_GAU_PER_PATTERN=3
 GAU_FILTER_EXTERNAL=true
+
 MAX_DALFOX_URLS=50
 MAX_SQLMAP_URLS=10
 MAX_JS_SECRET_SCAN=20
@@ -230,29 +464,242 @@ PASSIVE_PORTS=80,443,8080,8443,8000,3000,5000,5432,3306,6379,9200,27017,22,21,25
 PORT_SCAN_TIMEOUT_MS=800
 ```
 
-GAU ya no aplica un corte bruto temprano. Primero parsea todas las URLs historicas devueltas, descarta ruido externo/assets/trackers, deduplica por `origin + path + nombres de parametros + extension`, puntua endpoints utiles y solo despues limita por categoria. Las metricas distinguen URLs raw, validas, externas descartadas, assets descartados, duplicados/patrones descartados, URLs con parametros y seleccion final enviada a GF.
+---
 
-Feroxbuster registra binario, argumentos reales, wordlist usada, existencia de la wordlist, activos enviados, lineas raw, parseados JSONL y descartes por assets o status. Si no hay wordlist configurada intenta usar `common.txt` de SecLists/dirb cuando exista; si no, continua con warning claro. Una ruta interesante se reporta como superficie; exposiciones sensibles con HTTP 200, como `/.env`, `/.git`, backups o dumps SQL, se tratan como posibles vulnerabilidades para validacion.
+## Ejecución
+
+Instalar dependencias del backend:
+
+```bash
+cd backend
+npm install
+```
+
+Arrancar el servidor:
+
+```bash
+npm start
+```
+
+O directamente:
+
+```bash
+node server.js
+```
+
+Abrir la interfaz:
+
+```text
+http://localhost:3000
+```
+
+Desde la interfaz se introduce el dominio o URL objetivo y se inicia el análisis. El endpoint de streaming muestra el progreso de cada herramienta y devuelve los resultados al finalizar.
+
+---
+
+## Interfaz web
+
+La interfaz muestra:
+
+- estado de ejecución de cada herramienta;
+- métricas de superficie, vulnerabilidades, candidatos y hardening;
+- score global final;
+- grupos de hallazgos;
+- tarjetas individuales;
+- impacto y recomendación enriquecidos por IA;
+- criticidad potencial;
+- probabilidad real;
+- estado del hallazgo;
+- herramienta que originó el resultado;
+- indicador de verificación para hardening, superficie e informativos;
+- botón de generación de PDF.
+
+Para hallazgos confirmados, posibles y candidatos se muestra porcentaje de probabilidad real. Para hardening, superficie e informativos se muestra como observado o no aplicable, evitando aparentar que falta un dato.
+
+---
+
+## Informe PDF
+
+El PDF incluye:
+
+- portada ejecutiva
+- resumen de riesgo
+- métricas del análisis
+- timeline del pipeline
+- hallazgos confirmados y posibles
+- candidatos GF
+- hardening
+- superficie de ataque
+- correlaciones relevantes
+- recomendaciones
+- anexo técnico
+- métricas de cobertura IA
+- estado del score global IA
+
+El PDF se bloquea si:
+
+- no hay cobertura IA completa
+- algún hallazgo reportable sigue pendiente
+- el score global IA no se ha calculado correctamente
+- se detectan plantillas o fallbacks finales como impacto/recomendación
+
+---
+
+## Logs y trazabilidad
+
+Cada análisis genera trazas detalladas en consola y en la carpeta `logs/`.
+
+Los logs registran, entre otros:
+
+- objetivo analizado;
+- herramientas ejecutadas;
+- argumentos usados;
+- métricas por herramienta;
+- findings deterministas;
+- findings normalizados;
+- correlaciones;
+- llamadas IA por hallazgo;
+- respuestas IA;
+- validación de idioma;
+- reparación de respuestas no JSON;
+- guardrails aplicados;
+- cobertura IA;
+- score determinista previo;
+- score final IA;
+- motivo de bloqueo del PDF si aplica.
+
+Ejemplos de eventos IA:
+
+```text
+[AI-COVERAGE-PLAN]
+[AI-FINDING-START]
+[AI-FINDING-REQUEST]
+[AI-FINDING-RAW-RESPONSE]
+[AI-NORMALIZE]
+[AI-VALIDATION]
+[AI-RETRY]
+[AI-FINDING-END]
+[AI-COVERAGE-STATS]
+[AI-FINAL-SCORE-VALIDATED]
+```
+
+---
+
+## Pruebas
+
+Las pruebas del backend se ejecutan desde `backend/`:
+
+```bash
+cd backend
+npm test
+```
+
+La suite valida, entre otros aspectos:
+
+- selección completa de hallazgos reportables para IA;
+- contrato mínimo de IA;
+- reparación de respuestas no JSON;
+- bloqueo del PDF si falta cobertura;
+- ausencia de templates finales;
+- guardrails de probabilidad y severidad;
+- candidatos GF;
+- hardening y superficie;
+- presentación de probabilidad u observado;
+- score conservador;
+- parsing de herramientas;
+- calidad del pipeline.
+
+---
+
+## Consideraciones sobre herramientas
+
+### GF
+
+GF no confirma vulnerabilidades. Solo prioriza URLs o parámetros que coinciden con patrones conocidos. Sus resultados se clasifican como candidatos y requieren validación manual o confirmación mediante herramientas específicas.
+
+Ejemplos:
+
+- GF RCE: criticidad potencial crítica, probabilidad baja si no hay ejecución.
+- GF SQLi: criticidad potencial alta, probabilidad baja/media hasta validar.
+- GF SSRF: criticidad potencial alta, sin afirmar acceso interno si no hay callback o evidencia.
+- GF LFI: criticidad potencial alta, sin afirmar lectura de archivos si no hay prueba.
+- GF Open Redirect: criticidad potencial media, pendiente de confirmación.
+
+### Nuclei
+
+Nuclei se ejecuta con una configuración conservadora. Por defecto se usan severidades `critical,high,medium,low` y se evitan tags ruidosos como tecnología, CDN, WAF o favicon para no convertir fingerprinting en vulnerabilidad.
+
+Un resultado vacío de Nuclei no significa que no existan vulnerabilidades; solo significa que no hubo coincidencias en las plantillas ejecutadas.
+
+### Dalfox
+
+Dalfox se usa para validar XSS. Un XSS confirmado por Dalfox con payload reproducible se mantiene como confirmado y con probabilidad alta. No se eleva automáticamente a crítico salvo evidencia adicional, como robo de sesión, acciones privilegiadas o datos sensibles.
+
+### SQLMap
+
+SQLMap se ejecuta automáticamente sobre URLs con parámetros. Si no se descubren parámetros, el backend devuelve un aviso y no fuerza la ejecución.
+
+### Feroxbuster
+
+Feroxbuster descubre rutas y recursos. Las rutas interesantes se reportan como superficie. Recursos sensibles como `.env`, `.git`, backups o dumps pueden clasificarse como posibles vulnerabilidades si hay evidencia suficiente.
+
+### GAU y Katana
+
+GAU recupera URLs históricas y Katana descubre endpoints mediante crawling. El sistema filtra ruido, assets estáticos, duplicados y rutas externas antes de enviar resultados a GF o IA.
+
+### TruffleHog
+
+TruffleHog revisa recursos JavaScript o ficheros descargables seleccionados para detectar secretos. Los secretos verificados tienen mayor prioridad que los posibles.
+
+---
+
+## Limitaciones
+
+- La herramienta no sustituye la validación manual de un pentester.
+- Los candidatos GF deben confirmarse antes de reportarlos como vulnerabilidades reales.
+- La ausencia de hallazgos no garantiza ausencia de vulnerabilidades.
+- El resultado depende de la disponibilidad de herramientas externas y del modelo IA local.
+- Las pruebas activas pueden generar tráfico y deben ejecutarse solo con autorización.
+- El enriquecimiento IA puede tardar si hay muchos hallazgos reportables y el modelo local es lento.
+
+---
+
+## Uso ético y legal
+
+Este proyecto debe utilizarse exclusivamente sobre sistemas propios, entornos de laboratorio o activos para los que exista autorización expresa. El objetivo es defensivo, académico y orientado a la mejora de seguridad.
+
+No debe emplearse para analizar, explotar, degradar o recopilar información de sistemas de terceros sin permiso.
 
 ---
 
 ## Tecnologías utilizadas
 
-- Node.js + Express  
-- Ollama (modelo de lenguaje local en Windows)  
-- PDFKit  
-- HTML / JavaScript  
+- Node.js
+- Express
+- JavaScript
+- HTML/CSS
+- PDFKit
+- Ollama
+- subfinder
+- httpx
+- katana
+- gau
+- gf
+- nuclei
+- dalfox
+- sqlmap
+- feroxbuster
+- trufflehog
+- nmap
 
 ---
 
-## Notas
+## Autores
 
-- Ollama se ejecuta en el host Windows  
-- WSL Ubuntu ejecuta backend, frontend y herramientas de reconocimiento  
-- Requisitos imprescindibles:
-  - Ejecutar `OLLAMA_HOST=0.0.0.0 ollama serve`
-  - Tener WSL Ubuntu instalado y las herramientas del pipeline disponibles en `PATH`  
-  - Puerto 11434 permitido en firewall  
+Trabajo Fin de Máster desarrollado por:
+
+- **Diego Ramiro Jurado Reyna**
+- **José Antonio Montes Solano**
 
 ---
 
